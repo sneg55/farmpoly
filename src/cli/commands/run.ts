@@ -53,7 +53,20 @@ export const runCommand = new Command("run")
       console.log("Discovering reward markets...");
       const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
       const rewardMarkets = filterRewardMarkets(gammaMarkets);
-      const targetMarkets = rewardMarkets.slice(0, maxMarkets);
+
+      // Pre-filter: skip markets where budget can't meet minSize
+      const perSideMax = budget / 2; // best case: 1 market, 1 side
+      const affordable = rewardMarkets.filter((m) => {
+        const minShares = minSizeOverride ?? m.minSize;
+        const costPerSide = minShares * m.midpoint;
+        return costPerSide <= perSideMax;
+      });
+
+      if (affordable.length < rewardMarkets.length) {
+        console.log(chalk.dim(`  (Filtered out ${rewardMarkets.length - affordable.length} markets with minSize too high for budget)`));
+      }
+
+      const targetMarkets = (affordable.length > 0 ? affordable : rewardMarkets).slice(0, maxMarkets);
 
       if (targetMarkets.length === 0) {
         console.log(chalk.yellow("No reward markets found. Exiting."));
