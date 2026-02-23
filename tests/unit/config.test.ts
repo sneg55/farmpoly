@@ -16,6 +16,8 @@ describe("config / loadEnv", () => {
   it("rejects missing POLYGON_PRIVATE_KEY", async () => {
     delete process.env.POLYGON_PRIVATE_KEY;
     const { loadEnv } = await import("../../src/utils/config.js");
+    // dotenv.config() may re-populate from .env during import, so delete after
+    delete process.env.POLYGON_PRIVATE_KEY;
     expect(() => loadEnv()).toThrow("POLYGON_PRIVATE_KEY is required");
   });
 
@@ -48,6 +50,10 @@ describe("config / loadEnv", () => {
   it("provides default URLs when not set", async () => {
     process.env.POLYGON_PRIVATE_KEY = "c".repeat(64);
     const { loadEnv } = await import("../../src/utils/config.js");
+    // dotenv.config() may re-populate from .env during import, so delete after
+    delete process.env.POLYGON_RPC_URL;
+    delete process.env.CLOB_API_URL;
+    delete process.env.GAMMA_API_URL;
     const env = loadEnv();
     expect(env.polygonRpcUrl).toBe("https://polygon-rpc.com");
     expect(env.clobApiUrl).toBe("https://clob.polymarket.com");

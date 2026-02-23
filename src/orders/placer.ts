@@ -71,6 +71,7 @@ export async function placeOrdersForMarkets(
   markets: RewardMarket[],
   totalBudgetUsdc: number,
   spreadCents: number,
+  minSizeOverride?: number,
 ): Promise<PlacedOrder[]> {
   const { perSideUsdc } = allocateBudget(totalBudgetUsdc, markets.length);
   const placedOrders: PlacedOrder[] = [];
@@ -84,11 +85,22 @@ export async function placeOrdersForMarkets(
       market.tokenIdNo,
     );
 
-    if (!prices) continue;
+    if (!prices) {
+      console.log(`  Skipping ${market.question.slice(0, 50)}... (no valid price spread)`);
+      continue;
+    }
+
+    const effectiveMinSize = minSizeOverride ?? market.minSize;
 
     // BID side: buy YES token below midpoint
     const bidSize = sharesToBuy(perSideUsdc, prices.bidPrice);
-    if (bidSize >= market.minSize) {
+    if (bidSize < effectiveMinSize) {
+      console.log(
+        `  Skip BID: ${bidSize.toFixed(2)} shares < min ${effectiveMinSize} ` +
+        `($${perSideUsdc.toFixed(2)} @ ${prices.bidPrice.toFixed(2)})`,
+      );
+    }
+    if (bidSize >= effectiveMinSize) {
       try {
         const orderId = await placeSingleOrder(
           clobClient,
@@ -129,7 +141,13 @@ export async function placeOrdersForMarkets(
 
     // ASK side: sell YES token above midpoint
     const askSize = sharesToBuy(perSideUsdc, 1 - prices.askPrice);
-    if (askSize >= market.minSize) {
+    if (askSize < effectiveMinSize) {
+      console.log(
+        `  Skip ASK: ${askSize.toFixed(2)} shares < min ${effectiveMinSize} ` +
+        `($${perSideUsdc.toFixed(2)} @ ${prices.askPrice.toFixed(2)})`,
+      );
+    }
+    if (askSize >= effectiveMinSize) {
       try {
         const orderId = await placeSingleOrder(
           clobClient,

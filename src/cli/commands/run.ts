@@ -15,11 +15,13 @@ export const runCommand = new Command("run")
   .option("--spread <cents>", "Distance from midpoint in cents", "5")
   .option("--max-markets <n>", "Maximum number of markets", "10")
   .option("--danger-zone <cents>", "Danger zone distance in cents", "2")
+  .option("--min-size <shares>", "Override minimum order size (default: from API)")
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);
     const maxMarkets = parseInt(opts.maxMarkets);
     const dangerZoneCents = parseFloat(opts.dangerZone);
+    const minSizeOverride = opts.minSize ? parseFloat(opts.minSize) : undefined;
 
     if (isNaN(budget) || budget <= 0) {
       console.error(chalk.red("--budget must be a positive number"));
@@ -37,7 +39,11 @@ export const runCommand = new Command("run")
       console.log(chalk.bold("Starting PolyFarm daemon...\n"));
       console.log(`  Budget: $${budget} USDC`);
       console.log(`  Spread: ${spreadCents}c from midpoint`);
-      console.log(`  Danger zone: ${dangerZoneCents}c\n`);
+      console.log(`  Danger zone: ${dangerZoneCents}c`);
+      if (minSizeOverride !== undefined) {
+        console.log(`  Min size override: ${minSizeOverride} shares`);
+      }
+      console.log();
 
       // Auth
       const auth = await deriveOrLoadCreds(env, db);
@@ -68,6 +74,7 @@ export const runCommand = new Command("run")
         targetMarkets,
         budget,
         spreadCents,
+        minSizeOverride,
       );
 
       console.log(chalk.green(`Placed ${placed.length} orders across ${targetMarkets.length} markets\n`));
@@ -148,11 +155,13 @@ export const runCommand = new Command("run")
 
       // Heartbeat loop (keep orders alive)
       let heartbeatFailures = 0;
+      let heartbeatId: string | null = null;
       const MAX_HEARTBEAT_FAILURES = 5;
       const HEARTBEAT_INTERVAL_MS = 8000;
       const heartbeatInterval = setInterval(async () => {
         try {
-          await auth.clobClient.postHeartbeat();
+          const response = await auth.clobClient.postHeartbeat(heartbeatId);
+          heartbeatId = response.heartbeat_id;
           heartbeatFailures = 0;
         } catch (err) {
           heartbeatFailures++;
