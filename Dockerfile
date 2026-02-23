@@ -22,9 +22,8 @@ RUN pnpm install --frozen-lockfile --prod
 
 COPY --from=build /app/dist/ dist/
 
-# Data directory for SQLite
+# Data directory for SQLite (mount a Railway volume at /data)
 RUN mkdir -p /data
-VOLUME /data
 ENV POLYFARM_DB_PATH=/data/polyfarm.db
 
 ENTRYPOINT ["node", "dist/cli/index.js"]
