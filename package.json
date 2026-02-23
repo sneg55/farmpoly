@@ -7,7 +7,7 @@
     "polyfarm": "./dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/db/schema.sql dist/db/schema.sql",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",

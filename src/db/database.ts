@@ -5,7 +5,7 @@ import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export function createDatabase(dbPath: string = "polyfarm.db"): Database.Database {
+export function createDatabase(dbPath: string = process.env.POLYFARM_DB_PATH || "polyfarm.db"): Database.Database {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
