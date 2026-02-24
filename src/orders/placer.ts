@@ -1,7 +1,7 @@
 import type { ClobClient } from "@polymarket/clob-client";
 import { Side, OrderType } from "@polymarket/clob-client";
 import type { PolyfarmDb } from "../db/database.js";
-import type { RewardMarket } from "../discovery/rewards.js";
+import type { RewardMarket, AllocationResult } from "../discovery/rewards.js";
 import { calculateSafePrices, sharesToBuy, allocateBudget } from "./calculator.js";
 
 export interface PlacedOrder {
@@ -64,6 +64,8 @@ async function placeSingleOrder(
 
 /**
  * Place BID + ASK orders for a set of markets within budget.
+ * If allocations are provided, use them for weighted capital distribution.
+ * Otherwise, use equal allocation across all markets.
  */
 export async function placeOrdersForMarkets(
   clobClient: ClobClient,
@@ -72,11 +74,26 @@ export async function placeOrdersForMarkets(
   totalBudgetUsdc: number,
   spreadCents: number,
   minSizeOverride?: number,
+  allocations?: AllocationResult[],
 ): Promise<PlacedOrder[]> {
-  const { perSideUsdc } = allocateBudget(totalBudgetUsdc, markets.length);
+  // Build a map of conditionId -> allocated USDC if allocations provided
+  const allocationMap = new Map<string, number>();
+  if (allocations && allocations.length > 0) {
+    for (const alloc of allocations) {
+      allocationMap.set(alloc.market.conditionId, alloc.allocatedUsdc);
+    }
+  }
+
+  // Fallback: equal allocation
+  const { perSideUsdc: defaultPerSide } = allocateBudget(totalBudgetUsdc, markets.length);
+  
   const placedOrders: PlacedOrder[] = [];
 
   for (const market of markets) {
+    // Get per-market budget (from allocation or equal split)
+    const marketBudget = allocationMap.get(market.conditionId) ?? (defaultPerSide * 2);
+    const perSideUsdc = marketBudget / 2;
+
     const prices = calculateSafePrices(
       market.midpoint,
       spreadCents,

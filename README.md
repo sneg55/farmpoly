@@ -61,16 +61,25 @@ All commands are run via `pnpm dev <command>` (or `npx tsx src/cli/index.ts <com
 
 ### `discover` - Find reward markets
 
-Browse all sponsored markets without needing a private key.
+Browse all sponsored markets without needing a private key. Markets are sorted by **profitability score** by default, which accounts for reward/TVL ratio, capital efficiency, and TVL stability.
 
 ```bash
 pnpm dev discover --min-tvl 5000
+pnpm dev discover --min-daily-yield 1 --simulate-budget 100
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--min-tvl <amount>` | `10000` | Minimum TVL in USD |
 | `--limit <n>` | `20` | Max markets to display in terminal |
+| `--min-daily-yield <percent>` | `0` | Minimum daily yield % to include |
+| `--sort-by-rate` | off | Sort by reward rate instead of profitability score |
+| `--simulate-budget <usdc>` | - | Simulate capital allocation with this budget |
+
+**Output columns:**
+- **Yield%** - Daily yield percentage: `(reward/TVL) × 100`
+- **Score** - Profitability score accounting for capital requirements and TVL stability
+- **MinCap** - Minimum capital required to meet `minSize` requirements
 
 All discovered reward markets are saved to the local SQLite database regardless of `--limit`.
 
@@ -78,6 +87,7 @@ All discovered reward markets are saved to the local SQLite database regardless 
 
 ```bash
 pnpm dev run --budget 50 --spread 5
+pnpm dev run --budget 100 --rebalance-interval 30 --min-daily-yield 0.5
 ```
 
 | Flag | Default | Description |
@@ -86,14 +96,25 @@ pnpm dev run --budget 50 --spread 5
 | `--spread <cents>` | `5` | Distance from midpoint in cents |
 | `--max-markets <n>` | `10` | Maximum number of markets to trade |
 | `--danger-zone <cents>` | `2` | Cancel orders when price drifts within this distance |
+| `--rebalance-interval <min>` | `60` | Check for better markets every N minutes (0 to disable) |
+| `--min-daily-yield <percent>` | `0` | Minimum daily yield % to consider |
+| `--min-rebalance-improvement <percent>` | `20` | Minimum profitability gain to trigger rebalance |
+| `--no-smart-allocation` | off | Use equal allocation instead of profitability-weighted |
 
 The daemon will:
 1. Authenticate and derive API keys
-2. Discover the top reward markets
-3. Place BID + ASK orders spread evenly across markets
-4. Start the WebSocket safety monitor
-5. Send heartbeats every 8 seconds to keep orders alive
-6. Cancel and replace orders when prices drift into the danger zone
+2. Discover the top reward markets **sorted by profitability score**
+3. **Smart allocation**: Deploy more capital to higher-yield markets
+4. Place BID + ASK orders spread evenly across markets
+5. Start the WebSocket safety monitor
+6. Send heartbeats every 8 seconds to keep orders alive
+7. Cancel and replace orders when prices drift into the danger zone
+8. **Periodically rebalance** to better markets if profitability improves
+
+**Smart Capital Allocation:**
+- Markets with higher yield% get proportionally more capital
+- Ensures each market meets minimum size requirements
+- Shows expected daily/monthly earnings and APY on startup
 
 Press `Ctrl+C` for graceful shutdown (cancels all orders first).
 

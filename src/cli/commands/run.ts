@@ -4,10 +4,17 @@ import { loadEnv } from "../../utils/config.js";
 import { createDatabase, PolyfarmDb } from "../../db/database.js";
 import { deriveOrLoadCreds } from "../../auth/credentials.js";
 import { fetchGammaMarkets } from "../../discovery/gamma.js";
-import { filterRewardMarkets } from "../../discovery/rewards.js";
+import { 
+  filterRewardMarkets, 
+  allocateCapitalSmart, 
+  shouldRebalance,
+  type RewardMarket,
+  type AllocationResult,
+} from "../../discovery/rewards.js";
 import { placeOrdersForMarkets } from "../../orders/placer.js";
 import { WsConnectionManager } from "../../safety/websocket.js";
 import { SafetyMonitor } from "../../safety/monitor.js";
+import type { ClobClient } from "@polymarket/clob-client";
 
 export const runCommand = new Command("run")
   .description("Start the liquidity farming daemon")
@@ -16,12 +23,20 @@ export const runCommand = new Command("run")
   .option("--max-markets <n>", "Maximum number of markets", "10")
   .option("--danger-zone <cents>", "Danger zone distance in cents", "2")
   .option("--min-size <shares>", "Override minimum order size (default: from API)")
+  .option("--rebalance-interval <minutes>", "Check for better markets every N minutes (0 to disable)", "60")
+  .option("--min-daily-yield <percent>", "Minimum daily yield % to consider", "0")
+  .option("--min-rebalance-improvement <percent>", "Minimum profitability improvement to trigger rebalance", "20")
+  .option("--no-smart-allocation", "Use equal allocation instead of profitability-weighted")
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);
     const maxMarkets = parseInt(opts.maxMarkets);
     const dangerZoneCents = parseFloat(opts.dangerZone);
     const minSizeOverride = opts.minSize ? parseFloat(opts.minSize) : undefined;
+    const rebalanceIntervalMin = parseInt(opts.rebalanceInterval);
+    const minDailyYield = parseFloat(opts.minDailyYield);
+    const minRebalanceImprovement = parseFloat(opts.minRebalanceImprovement);
+    const useSmartAllocation = opts.smartAllocation !== false;
 
     if (isNaN(budget) || budget <= 0) {
       console.error(chalk.red("--budget must be a positive number"));
@@ -30,6 +45,8 @@ export const runCommand = new Command("run")
 
     let rawDb: ReturnType<typeof createDatabase> | null = null;
     let monitor: SafetyMonitor | null = null;
+    let rebalanceInterval: NodeJS.Timeout | null = null;
+    let currentMarkets: RewardMarket[] = [];
 
     try {
       const env = loadEnv();
@@ -40,6 +57,13 @@ export const runCommand = new Command("run")
       console.log(`  Budget: $${budget} USDC`);
       console.log(`  Spread: ${spreadCents}c from midpoint`);
       console.log(`  Danger zone: ${dangerZoneCents}c`);
+      console.log(`  Smart allocation: ${useSmartAllocation ? chalk.green("ON") : chalk.yellow("OFF")}`);
+      if (minDailyYield > 0) {
+        console.log(`  Min daily yield: ${minDailyYield}%`);
+      }
+      if (rebalanceIntervalMin > 0) {
+        console.log(`  Rebalance check: every ${rebalanceIntervalMin} minutes`);
+      }
       if (minSizeOverride !== undefined) {
         console.log(`  Min size override: ${minSizeOverride} shares`);
       }
@@ -49,24 +73,147 @@ export const runCommand = new Command("run")
       const auth = await deriveOrLoadCreds(env, db);
       console.log(chalk.green(`Authenticated as ${auth.wallet.address}\n`));
 
-      // Discover markets
-      console.log("Discovering reward markets...");
-      const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
-      const rewardMarkets = filterRewardMarkets(gammaMarkets);
+      /**
+       * Discover and select markets based on profitability
+       */
+      async function discoverAndAllocate(): Promise<{ 
+        markets: RewardMarket[]; 
+        allocations: AllocationResult[];
+      }> {
+        const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
+        const rewardMarkets = filterRewardMarkets(gammaMarkets, {
+          minDailyYield,
+          sortByProfitability: true,
+          spreadCents,
+        });
 
-      // Pre-filter: skip markets where budget can't meet minSize
-      const perSideMax = budget / 2; // best case: 1 market, 1 side
-      const affordable = rewardMarkets.filter((m) => {
-        const minShares = minSizeOverride ?? m.minSize;
-        const costPerSide = minShares * m.midpoint;
-        return costPerSide <= perSideMax;
-      });
-
-      if (affordable.length < rewardMarkets.length) {
-        console.log(chalk.dim(`  (Filtered out ${rewardMarkets.length - affordable.length} markets with minSize too high for budget)`));
+        if (useSmartAllocation) {
+          // Smart allocation based on profitability
+          const allocations = allocateCapitalSmart(rewardMarkets, budget, maxMarkets);
+          const markets = allocations.map(a => a.market);
+          return { markets, allocations };
+        } else {
+          // Equal allocation (legacy behavior)
+          const perSideMax = budget / 2;
+          const affordable = rewardMarkets.filter((m) => {
+            const minShares = minSizeOverride ?? m.minSize;
+            const costPerSide = minShares * m.midpoint;
+            return costPerSide <= perSideMax;
+          });
+          const markets = (affordable.length > 0 ? affordable : rewardMarkets).slice(0, maxMarkets);
+          return { markets, allocations: [] };
+        }
       }
 
-      const targetMarkets = (affordable.length > 0 ? affordable : rewardMarkets).slice(0, maxMarkets);
+      /**
+       * Place orders for selected markets
+       */
+      async function deployCapital(
+        markets: RewardMarket[],
+        allocations: AllocationResult[],
+      ): Promise<number> {
+        console.log("Placing orders...");
+        
+        // If we have allocations, use them for capital distribution
+        // Otherwise fall back to equal distribution
+        const placed = await placeOrdersForMarkets(
+          auth.clobClient,
+          db,
+          markets,
+          budget,
+          spreadCents,
+          minSizeOverride,
+          useSmartAllocation ? allocations : undefined,
+        );
+
+        for (const order of placed) {
+          console.log(
+            `  ${order.side === "BUY" ? chalk.green("BID") : chalk.red("ASK")} ` +
+              `${order.price.toFixed(2)} x ${order.size.toFixed(1)} ` +
+              `[${order.orderId.slice(0, 8)}...]`,
+          );
+        }
+
+        return placed.length;
+      }
+
+      /**
+       * Cancel all current orders and redeploy to new markets
+       */
+      async function performRebalance(): Promise<void> {
+        console.log(chalk.bold("\n🔄 Checking for rebalancing opportunities..."));
+        
+        const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
+        const allRewardMarkets = filterRewardMarkets(gammaMarkets, {
+          minDailyYield,
+          sortByProfitability: true,
+          spreadCents,
+        });
+
+        const decision = shouldRebalance(
+          currentMarkets,
+          allRewardMarkets,
+          maxMarkets,
+          minRebalanceImprovement,
+        );
+
+        console.log(chalk.dim(`  Decision: ${decision.reason}`));
+
+        if (!decision.shouldRebalance) {
+          console.log(chalk.dim("  No rebalancing needed.\n"));
+          return;
+        }
+
+        console.log(chalk.yellow(`  Rebalancing for ${decision.profitabilityGain.toFixed(1)}% improvement!`));
+        console.log(chalk.dim(`  Adding ${decision.addMarkets.length} markets, removing ${decision.removeMarkets.length}`));
+
+        // Cancel all existing orders
+        console.log("  Cancelling existing orders...");
+        try {
+          await auth.clobClient.cancelAll();
+          db.cancelAllOrders();
+          console.log(chalk.green("  Orders cancelled."));
+        } catch (err) {
+          console.error(chalk.red("  Failed to cancel orders:"), err);
+          return;
+        }
+
+        // Rediscover and allocate with fresh data
+        const { markets, allocations } = await discoverAndAllocate();
+        
+        if (markets.length === 0) {
+          console.log(chalk.yellow("  No markets available after rebalance. Keeping position flat."));
+          currentMarkets = [];
+          return;
+        }
+
+        // Deploy to new markets
+        const orderCount = await deployCapital(markets, allocations);
+        currentMarkets = markets;
+
+        // Update monitor subscriptions
+        if (monitor) {
+          const subscribedTokens = new Set<string>();
+          for (const market of markets) {
+            if (!subscribedTokens.has(market.tokenIdYes)) {
+              monitor.subscribeToMarket(market.tokenIdYes);
+              subscribedTokens.add(market.tokenIdYes);
+            }
+          }
+        }
+
+        console.log(chalk.green(`  Rebalanced: ${orderCount} orders across ${markets.length} markets\n`));
+        
+        // Log expected daily earnings
+        if (allocations.length > 0) {
+          const totalDaily = allocations.reduce((sum, a) => sum + a.expectedDailyReward, 0);
+          console.log(chalk.dim(`  Expected: $${totalDaily.toFixed(2)}/day`));
+        }
+      }
+
+      // Initial discovery
+      console.log("Discovering reward markets...");
+      const { markets: targetMarkets, allocations } = await discoverAndAllocate();
 
       if (targetMarkets.length === 0) {
         console.log(chalk.yellow("No reward markets found. Exiting."));
@@ -75,31 +222,37 @@ export const runCommand = new Command("run")
 
       console.log(chalk.green(`Found ${targetMarkets.length} reward markets\n`));
 
+      // Log profitability summary
+      if (allocations.length > 0) {
+        console.log(chalk.dim("Capital allocation:"));
+        for (const alloc of allocations.slice(0, 5)) {
+          console.log(chalk.dim(
+            `  ${alloc.market.question.slice(0, 40)}... ` +
+            `$${alloc.allocatedUsdc.toFixed(0)} → $${alloc.expectedDailyReward.toFixed(2)}/day`
+          ));
+        }
+        if (allocations.length > 5) {
+          console.log(chalk.dim(`  ... and ${allocations.length - 5} more`));
+        }
+        const totalDaily = allocations.reduce((sum, a) => sum + a.expectedDailyReward, 0);
+        console.log(chalk.green(
+          `\nExpected earnings: $${totalDaily.toFixed(2)}/day = ` +
+          `$${(totalDaily * 30).toFixed(0)}/month = ` +
+          `${((totalDaily * 365 / budget) * 100).toFixed(1)}% APY\n`
+        ));
+      }
+
+      currentMarkets = targetMarkets;
+
       // Start session
       const sessionId = db.startSession(budget, spreadCents);
       db.updateSessionStats(sessionId, { markets_count: targetMarkets.length });
 
-      // Place orders
-      console.log("Placing orders...");
-      const placed = await placeOrdersForMarkets(
-        auth.clobClient,
-        db,
-        targetMarkets,
-        budget,
-        spreadCents,
-        minSizeOverride,
-      );
+      // Deploy capital
+      const placedCount = await deployCapital(targetMarkets, allocations);
 
-      console.log(chalk.green(`Placed ${placed.length} orders across ${targetMarkets.length} markets\n`));
-      db.updateSessionStats(sessionId, { orders_placed: placed.length });
-
-      for (const order of placed) {
-        console.log(
-          `  ${order.side === "BUY" ? chalk.green("BID") : chalk.red("ASK")} ` +
-            `${order.price.toFixed(2)} x ${order.size.toFixed(1)} ` +
-            `[${order.orderId.slice(0, 8)}...]`,
-        );
-      }
+      console.log(chalk.green(`Placed ${placedCount} orders across ${targetMarkets.length} markets\n`));
+      db.updateSessionStats(sessionId, { orders_placed: placedCount });
 
       // Start safety monitor
       console.log(chalk.bold("\nStarting safety monitor..."));
@@ -186,10 +339,25 @@ export const runCommand = new Command("run")
         }
       }, HEARTBEAT_INTERVAL_MS);
 
+      // Rebalancing loop (check for better markets periodically)
+      if (rebalanceIntervalMin > 0) {
+        const REBALANCE_INTERVAL_MS = rebalanceIntervalMin * 60 * 1000;
+        console.log(chalk.dim(`Next rebalance check in ${rebalanceIntervalMin} minutes`));
+        
+        rebalanceInterval = setInterval(async () => {
+          try {
+            await performRebalance();
+          } catch (err) {
+            console.error(chalk.red("Rebalance error:"), (err as Error).message);
+          }
+        }, REBALANCE_INTERVAL_MS);
+      }
+
       // Graceful shutdown
       const shutdown = async (signal: string) => {
         console.log(chalk.bold(`\n${signal} received. Shutting down gracefully...`));
         clearInterval(heartbeatInterval);
+        if (rebalanceInterval) clearInterval(rebalanceInterval);
         monitor?.stop();
 
         console.log("Cancelling all live orders...");
