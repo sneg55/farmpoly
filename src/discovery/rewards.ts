@@ -1,4 +1,5 @@
 import type { GammaMarket } from "./gamma.js";
+import { calculateStabilityScore, isToVolatile } from "../intelligence/stability.js";
 
 export interface RewardMarket {
   conditionId: string;
@@ -14,8 +15,10 @@ export interface RewardMarket {
   maxSpread: number;
   /** Daily yield % = (rewardRate / tvl) × 100 */
   dailyYieldPercent: number;
-  /** Profitability score accounting for capital requirements */
+  /** Profitability score accounting for capital requirements and stability */
   profitabilityScore: number;
+  /** Market stability score (0-1, higher = safer) */
+  stabilityScore: number;
   /** Minimum capital needed to meet minSize requirements */
   minCapitalRequired: number;
 }
@@ -113,18 +116,21 @@ export interface FilterOptions {
   sortByProfitability?: boolean;
   /** Spread in cents for capital calculations */
   spreadCents?: number;
+  /** Maximum 24h price change in cents before excluding market (default: 5) */
+  maxVolatilityCents?: number;
 }
 
 export function filterRewardMarkets(
   gammaMarkets: GammaMarket[],
   options: FilterOptions = {},
 ): RewardMarket[] {
-  const { 
-    minDailyYield = 0, 
+  const {
+    minDailyYield = 0,
     sortByProfitability = true,
     spreadCents = 5,
+    maxVolatilityCents = 5,
   } = options;
-  
+
   const rewardMarkets: RewardMarket[] = [];
 
   for (const market of gammaMarkets) {
@@ -139,15 +145,27 @@ export function filterRewardMarkets(
     // Safety bounds: skip markets where price is extreme
     if (!isWithinSafetyBounds(midpoint)) continue;
 
+    // Volatility filter: skip markets with excessive 24h price change
+    if (isToVolatile(market, maxVolatilityCents)) continue;
+
+    // Calculate stability score
+    const stabilityScore = calculateStabilityScore(market);
+
+    // Filter out markets that are too risky (stability < 0.2)
+    if (stabilityScore < 0.2) continue;
+
     // tickSize from API is a number (e.g. 0.01), convert to string for SDK
     const tickSizeStr = String(market.tickSize);
     const minSize = market.rewardsMinSize || market.minOrderSize || 5;
     const tvl = market.liquidity;
-    
+
     // Calculate profitability metrics
     const dailyYieldPercent = calculateDailyYield(market.rewardsDailyRate, tvl);
     const minCapitalRequired = calculateMinCapitalRequired(minSize, midpoint, spreadCents);
-    const profitabilityScore = calculateProfitabilityScore(dailyYieldPercent, minCapitalRequired, tvl);
+    const baseProfitability = calculateProfitabilityScore(dailyYieldPercent, minCapitalRequired, tvl);
+
+    // Incorporate stability: score = baseProfitability × stabilityScore
+    const profitabilityScore = baseProfitability * stabilityScore;
 
     // Filter by minimum daily yield
     if (dailyYieldPercent < minDailyYield) continue;
@@ -166,6 +184,7 @@ export function filterRewardMarkets(
       maxSpread: market.rewardsMaxSpread || 0.05,
       dailyYieldPercent,
       profitabilityScore,
+      stabilityScore,
       minCapitalRequired,
     });
   }

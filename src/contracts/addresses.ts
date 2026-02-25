@@ -40,3 +40,11 @@ export const CTF_REDEEM_ABI = [
 export const NEG_RISK_REDEEM_ABI = [
   "function redeemPositions(bytes32 conditionId, uint256[] amounts)",
 ];
+
+export const CTF_MERGE_ABI = [
+  "function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets, uint256 amount)",
+];
+
+export const NEG_RISK_MERGE_ABI = [
+  "function mergePositions(bytes32 conditionId, uint256 amount)",
+];

@@ -30,6 +30,12 @@ export interface GammaMarketRaw {
   rewardsMinSize: number;
   rewardsMaxSpread: number;
   clobRewards?: ClobReward[];
+  oneDayPriceChange?: number;
+  oneHourPriceChange?: number;
+  volume24hr?: number;
+  spread?: number;
+  bestBid?: number;
+  bestAsk?: number;
 }
 
 /** Normalized market shape for our internal use */
@@ -51,6 +57,12 @@ export interface GammaMarket {
   rewardsMinSize: number;
   rewardsMaxSpread: number;
   rewardsDailyRate: number;
+  oneDayPriceChange: number;
+  oneHourPriceChange: number;
+  volume24hr: number;
+  spread: number;
+  bestBid: number;
+  bestAsk: number;
 }
 
 function parseJsonField<T>(val: string | T[]): T[] | null {
@@ -105,6 +117,12 @@ function normalizeMarket(raw: GammaMarketRaw): GammaMarket | null {
     rewardsMinSize: raw.rewardsMinSize || 5,
     rewardsMaxSpread: raw.rewardsMaxSpread || 0,
     rewardsDailyRate,
+    oneDayPriceChange: raw.oneDayPriceChange ?? 0,
+    oneHourPriceChange: raw.oneHourPriceChange ?? 0,
+    volume24hr: raw.volume24hr ?? 0,
+    spread: raw.spread ?? 0,
+    bestBid: raw.bestBid ?? 0,
+    bestAsk: raw.bestAsk ?? 0,
   };
 }
 

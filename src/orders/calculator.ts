@@ -40,6 +40,7 @@ function roundToTick(price: number, tickSize: number, direction: "floor" | "ceil
  * @param tickSize - Market tick size string (e.g., "0.01")
  * @param tokenIdYes - Yes token ID (used for both BID and ASK sides)
  * @param tokenIdNo - No token ID (currently unused — kept for future two-token strategies)
+ * @param maxSpreadCents - Maximum spread in cents from market's rewardsMaxSpread (for reward qualification)
  */
 export function calculateSafePrices(
   midpoint: number,
@@ -47,11 +48,17 @@ export function calculateSafePrices(
   tickSize: string,
   tokenIdYes: string,
   _tokenIdNo: string,
+  maxSpreadCents?: number,
 ): SafePrices | null {
   const tick = TICK_SIZES[tickSize];
   if (!tick) throw new Error(`Invalid tick size: ${tickSize}`);
 
-  const spread = spreadCents / 100;
+  // Enforce reward qualification: never exceed market's maxSpread
+  const effectiveSpreadCents = maxSpreadCents
+    ? Math.min(spreadCents, maxSpreadCents)
+    : spreadCents;
+
+  const spread = effectiveSpreadCents / 100;
 
   // BID: buy YES token below midpoint
   let bidPrice = roundToTick(midpoint - spread, tick, "floor");

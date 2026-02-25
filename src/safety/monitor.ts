@@ -15,7 +15,7 @@ export interface MidpointState {
   lastUpdated: number;
 }
 
-const DEFAULT_DANGER_ZONE_CENTS = 2;
+const DEFAULT_DANGER_ZONE_CENTS = 3;
 const DEFAULT_REPLACEMENT_COOLDOWN_MS = 500;
 const SLOW_CANCEL_THRESHOLD_MS = 200;
 
@@ -129,24 +129,40 @@ export class SafetyMonitor extends EventEmitter {
     if (!orderMap || orderMap.size === 0) return;
     const liveOrders = Array.from(orderMap.values());
 
-    const dangerousOrders: OrderRow[] = [];
+    const dangerZone = this.dangerZoneCents / 100;
+    const yellowThreshold = dangerZone;          // full danger zone distance
+    const redThreshold = dangerZone / 2;         // half danger zone = immediate cancel
+
+    const redOrders: OrderRow[] = [];
     for (const order of liveOrders) {
-      if (isInDangerZone(order.price, midpoint, this.dangerZoneCents)) {
+      const distance = Math.abs(order.price - midpoint);
+
+      if (distance < redThreshold + 1e-10) {
+        // RED: immediate cancel
         this.emit("danger", {
           orderId: order.order_id,
           orderPrice: order.price,
           midpoint,
-          distance: Math.abs(order.price - midpoint),
+          distance,
         });
-        dangerousOrders.push(order);
+        redOrders.push(order);
+      } else if (distance < yellowThreshold + 1e-10) {
+        // YELLOW: warning, no cancel yet
+        this.emit("warning", {
+          orderId: order.order_id,
+          orderPrice: order.price,
+          midpoint,
+          distance,
+        });
       }
+      // GREEN: distance > yellowThreshold, do nothing
     }
 
-    if (dangerousOrders.length === 0) return;
+    if (redOrders.length === 0) return;
 
-    // Cancel all dangerous orders concurrently
+    // Cancel all red-zone orders concurrently
     const results = await Promise.allSettled(
-      dangerousOrders.map((order) => this.cancelOrderDefensively(order, startTime)),
+      redOrders.map((order) => this.cancelOrderDefensively(order, startTime)),
     );
 
     for (const result of results) {
@@ -154,6 +170,34 @@ export class SafetyMonitor extends EventEmitter {
         this.emit("panic", new Error(`Cancel failed: ${result.reason}`));
       }
     }
+  }
+
+  /**
+   * Cancel all orders on the counterpart side for a given condition.
+   * Used after a fill to prevent double exposure (e.g., if BID fills, cancel all ASKs).
+   */
+  async cancelCounterpartOrders(conditionId: string, filledSide: "BUY" | "SELL"): Promise<string[]> {
+    const cancelledIds: string[] = [];
+    const oppositeSide = filledSide === "BUY" ? "SELL" : "BUY";
+
+    // Scan in-memory index for orders matching this condition and opposite side
+    for (const [tokenId, orderMap] of this.ordersByToken) {
+      for (const [orderId, order] of orderMap) {
+        if (order.condition_id === conditionId && order.side === oppositeSide) {
+          try {
+            await this.clobClient.cancelOrder({ orderID: orderId });
+            this.db.cancelOrder(orderId);
+            this.removeOrderFromIndex(orderId, tokenId);
+            cancelledIds.push(orderId);
+            this.emit("cancelled", { orderId, latencyMs: 0, reason: "counterpart_cancel" });
+          } catch {
+            this.emit("cancel_failed", { orderId, error: "counterpart cancel failed" });
+          }
+        }
+      }
+    }
+
+    return cancelledIds;
   }
 
   private async cancelOrderDefensively(order: OrderRow, startTime: number): Promise<void> {

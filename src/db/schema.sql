@@ -45,7 +45,28 @@ CREATE TABLE IF NOT EXISTS config (
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+CREATE TABLE IF NOT EXISTS hedges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trade_id TEXT NOT NULL,
+  order_id TEXT NOT NULL,
+  condition_id TEXT NOT NULL REFERENCES markets(condition_id),
+  fill_side TEXT NOT NULL CHECK(fill_side IN ('BUY', 'SELL')),
+  fill_size REAL NOT NULL,
+  fill_price REAL NOT NULL,
+  hedge_order_id TEXT,
+  hedge_price REAL,
+  hedge_size REAL NOT NULL DEFAULT 0,
+  merge_amount REAL NOT NULL DEFAULT 0,
+  merge_tx_hash TEXT,
+  pnl_cents REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'PENDING'
+    CHECK(status IN ('PENDING', 'HEDGED', 'HEDGE_FAILED', 'MERGE_FAILED', 'SKIPPED')),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  completed_at INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_recent ON orders(status, cancelled_at DESC, placed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hedges_status ON hedges(status);

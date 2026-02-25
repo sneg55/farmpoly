@@ -97,9 +97,32 @@ export async function getTokenBalances(
  * events on the ConditionalTokens contract, then checking current balances.
  * Returns only tokens with non-zero balance.
  *
- * @param fromBlock - Block to start scanning from (default: last ~6 months on Polygon)
+ * @param fromBlock - Block to start scanning from (default: ~2 weeks back on Polygon)
  */
-const BLOCK_RANGE = 5000; // Max range per eth_getLogs query on most RPCs
+const LOG_CHUNK = 3_000; // blocks per eth_getLogs query (conservative for free RPCs)
+const MAX_RETRIES = 3;
+
+async function queryWithRetry(
+  ct: Contract,
+  filter: any,
+  from: number,
+  to: number,
+): Promise<ethers.Event[]> {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await ct.queryFilter(filter, from, to);
+    } catch (err: any) {
+      const msg = err.message ?? "";
+      const isRetryable = msg.includes("timed out") || msg.includes("-32002") || msg.includes("rate");
+      if (isRetryable && attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  return [];
+}
 
 export async function discoverHeldTokens(
   wallet: Wallet,
@@ -110,54 +133,60 @@ export async function discoverHeldTokens(
   const ct = new Contract(CONDITIONAL_TOKENS, ERC1155_BALANCE_ABI, provider);
 
   const currentBlock = await provider.getBlockNumber();
-  // Default: ~6 months back (Polygon ~2s blocks → ~7.8M blocks in 6mo)
-  const startBlock = fromBlock ?? Math.max(0, currentBlock - 7_800_000);
+  // Default: ~2 weeks back (Polygon ~2s blocks → ~604,800 blocks)
+  const startBlock = fromBlock ?? Math.max(0, currentBlock - 604_800);
+  const totalBlocks = currentBlock - startBlock;
+
+  console.log(`  Scanning blocks ${startBlock}..${currentBlock} (${totalBlocks.toLocaleString()} blocks)`);
 
   const tokenIdSet = new Set<string>();
+  const singleFilter = ct.filters.TransferSingle(null, null, wallet.address);
+  const batchFilter = ct.filters.TransferBatch(null, null, wallet.address);
 
-  // Scan in chunks to stay within RPC log query limits
-  for (let from = startBlock; from <= currentBlock; from += BLOCK_RANGE) {
-    const to = Math.min(from + BLOCK_RANGE - 1, currentBlock);
+  for (let from = startBlock; from <= currentBlock; from += LOG_CHUNK) {
+    const to = Math.min(from + LOG_CHUNK - 1, currentBlock);
 
-    // TransferSingle: indexed(operator, from, to), id, value
-    const singleFilter = ct.filters.TransferSingle(null, null, wallet.address);
-    const singleLogs = await ct.queryFilter(singleFilter, from, to);
-    for (const log of singleLogs) {
-      if (log.args) {
-        tokenIdSet.add(log.args.id.toString());
+    try {
+      // Run sequentially to avoid overwhelming free RPCs
+      const singleLogs = await queryWithRetry(ct, singleFilter, from, to);
+      const batchLogs = await queryWithRetry(ct, batchFilter, from, to);
+
+      for (const log of singleLogs) {
+        if (log.args) tokenIdSet.add(log.args.id.toString());
       }
-    }
-
-    // TransferBatch: indexed(operator, from, to), ids[], values[]
-    const batchFilter = ct.filters.TransferBatch(null, null, wallet.address);
-    const batchLogs = await ct.queryFilter(batchFilter, from, to);
-    for (const log of batchLogs) {
-      if (log.args) {
-        for (const id of log.args.ids) {
-          tokenIdSet.add(id.toString());
+      for (const log of batchLogs) {
+        if (log.args) {
+          for (const id of log.args.ids) tokenIdSet.add(id.toString());
         }
       }
-    }
-
-    // Progress log every 50k blocks
-    if ((from - startBlock) % 50_000 < BLOCK_RANGE) {
-      const pct = Math.round(((from - startBlock) / (currentBlock - startBlock)) * 100);
-      if (pct > 0 && pct < 100) {
-        process.stdout.write(`\r  Scanning events... ${pct}%`);
+    } catch (err: any) {
+      // Pruned history — skip forward
+      const msg = err.message ?? "";
+      if (msg.includes("pruned") || msg.includes("-32701")) {
+        const skip = Math.min(100_000, currentBlock - from);
+        from += skip - LOG_CHUNK;
+        continue;
       }
+      throw err;
+    }
+
+    // Progress every ~100k blocks
+    const scanned = from - startBlock + LOG_CHUNK;
+    if (totalBlocks > 0 && scanned % 100_000 < LOG_CHUNK) {
+      const pct = Math.min(99, Math.round((scanned / totalBlocks) * 100));
+      process.stdout.write(`\r  Scanning events... ${pct}%`);
     }
   }
 
-  if (tokenIdSet.size > 0) {
-    process.stdout.write(`\r  Found ${tokenIdSet.size} unique token IDs from events\n`);
-  }
+  process.stdout.write(`\r  Scan complete — ${tokenIdSet.size} unique token ID(s) found\n`);
 
   if (tokenIdSet.size === 0) return [];
 
   // Check current balances for discovered tokens
   const tokenIds = [...tokenIdSet];
   const balances = await getTokenBalances(wallet, env, tokenIds);
-  return balances.filter((b) => !b.balance.isZero());
+  const nonZero = balances.filter((b) => !b.balance.isZero());
+  return nonZero;
 }
 
 /**

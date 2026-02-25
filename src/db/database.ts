@@ -44,6 +44,25 @@ export interface OrderRow {
   expiry: number | null;
 }
 
+export interface HedgeRow {
+  id: number;
+  trade_id: string;
+  order_id: string;
+  condition_id: string;
+  fill_side: "BUY" | "SELL";
+  fill_size: number;
+  fill_price: number;
+  hedge_order_id: string | null;
+  hedge_price: number | null;
+  hedge_size: number;
+  merge_amount: number;
+  merge_tx_hash: string | null;
+  pnl_cents: number;
+  status: "PENDING" | "HEDGED" | "HEDGE_FAILED" | "MERGE_FAILED" | "SKIPPED";
+  created_at: number;
+  completed_at: number | null;
+}
+
 export interface SessionRow {
   id: number;
   started_at: number;
@@ -101,6 +120,31 @@ export class PolyfarmDb {
       // Dedicated session stat update statements (avoids N+1 in cancel handler)
       incrCancelled: db.prepare(
         "UPDATE sessions SET orders_cancelled = orders_cancelled + ? WHERE id=?",
+      ),
+      incrFilled: db.prepare(
+        "UPDATE sessions SET orders_filled = orders_filled + ? WHERE id=?",
+      ),
+      updateOrderFill: db.prepare(
+        "UPDATE orders SET filled_size = filled_size + ?, status = CASE WHEN filled_size + ? >= size THEN 'FILLED' ELSE status END WHERE order_id = ?",
+      ),
+      insertHedge: db.prepare(
+        `INSERT INTO hedges (trade_id, order_id, condition_id, fill_side, fill_size, fill_price, status)
+         VALUES (@trade_id, @order_id, @condition_id, @fill_side, @fill_size, @fill_price, @status)`,
+      ),
+      updateHedge: db.prepare(
+        `UPDATE hedges SET
+           hedge_order_id = @hedge_order_id,
+           hedge_price = @hedge_price,
+           hedge_size = @hedge_size,
+           merge_amount = @merge_amount,
+           merge_tx_hash = @merge_tx_hash,
+           pnl_cents = @pnl_cents,
+           status = @status,
+           completed_at = unixepoch()
+         WHERE id = @id`,
+      ),
+      getRecentHedges: db.prepare(
+        "SELECT * FROM hedges ORDER BY created_at DESC LIMIT ?",
       ),
     };
   }
@@ -170,6 +214,47 @@ export class PolyfarmDb {
   /** Increment cancelled counter directly (avoids getActiveSession + updateSessionStats N+1) */
   incrementCancelled(sessionId: number, count: number = 1): void {
     this.stmts.incrCancelled.run(count, sessionId);
+  }
+
+  /** Increment filled counter directly */
+  incrementFilled(sessionId: number, count: number = 1): void {
+    this.stmts.incrFilled.run(count, sessionId);
+  }
+
+  /** Update filled_size on an order and flip status to FILLED when fully filled */
+  updateOrderFill(orderId: string, filledSize: number): void {
+    this.stmts.updateOrderFill.run(filledSize, filledSize, orderId);
+  }
+
+  // Hedges
+  insertHedge(hedge: {
+    trade_id: string;
+    order_id: string;
+    condition_id: string;
+    fill_side: "BUY" | "SELL";
+    fill_size: number;
+    fill_price: number;
+    status: string;
+  }): number {
+    const result = this.stmts.insertHedge.run(hedge);
+    return Number(result.lastInsertRowid);
+  }
+
+  updateHedge(hedge: {
+    id: number;
+    hedge_order_id: string | null;
+    hedge_price: number | null;
+    hedge_size: number;
+    merge_amount: number;
+    merge_tx_hash: string | null;
+    pnl_cents: number;
+    status: string;
+  }): void {
+    this.stmts.updateHedge.run(hedge);
+  }
+
+  getRecentHedges(limit: number = 50): HedgeRow[] {
+    return this.stmts.getRecentHedges.all(limit) as HedgeRow[];
   }
 
   getActiveSession(): SessionRow | undefined {

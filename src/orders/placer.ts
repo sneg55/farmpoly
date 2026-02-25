@@ -2,6 +2,8 @@ import type { ClobClient } from "@polymarket/clob-client";
 import { Side, OrderType } from "@polymarket/clob-client";
 import type { PolyfarmDb } from "../db/database.js";
 import type { RewardMarket, AllocationResult } from "../discovery/rewards.js";
+import type { TrendDirection } from "../intelligence/trend.js";
+import { allowedSides } from "../intelligence/trend.js";
 import { calculateSafePrices, sharesToBuy, allocateBudget } from "./calculator.js";
 
 export interface PlacedOrder {
@@ -75,6 +77,7 @@ export async function placeOrdersForMarkets(
   spreadCents: number,
   minSizeOverride?: number,
   allocations?: AllocationResult[],
+  trendByMarket?: Map<string, TrendDirection>,
 ): Promise<PlacedOrder[]> {
   // Build a map of conditionId -> allocated USDC if allocations provided
   const allocationMap = new Map<string, number>();
@@ -86,7 +89,7 @@ export async function placeOrdersForMarkets(
 
   // Fallback: equal allocation
   const { perSideUsdc: defaultPerSide } = allocateBudget(totalBudgetUsdc, markets.length);
-  
+
   const placedOrders: PlacedOrder[] = [];
   // Track cumulative committed capital to avoid over-committing beyond total budget.
   // Use a small absolute epsilon to absorb floating-point rounding only.
@@ -96,6 +99,15 @@ export async function placeOrdersForMarkets(
   const expiration = getEndOfDayUtc();
 
   for (const market of markets) {
+    // Determine which sides are allowed based on trend
+    const trend = trendByMarket?.get(market.conditionId);
+    const sides = trend ? allowedSides(trend) : { bid: true, ask: true };
+
+    if (!sides.bid && !sides.ask) {
+      console.log(`  Skipping ${market.question.slice(0, 50)}... (CHOPPY trend, too dangerous)`);
+      continue;
+    }
+
     // Ensure market exists in DB (FK constraint: orders.condition_id → markets.condition_id)
     db.upsertMarket({
       condition_id: market.conditionId,
@@ -111,7 +123,17 @@ export async function placeOrdersForMarkets(
 
     // Get per-market budget (from allocation or equal split)
     const marketBudget = allocationMap.get(market.conditionId) ?? (defaultPerSide * 2);
-    const perSideUsdc = marketBudget / 2;
+    // When one-sided, allocate full market budget to the single side
+    const oneSided = !sides.bid || !sides.ask;
+    const perSideUsdc = oneSided ? marketBudget : marketBudget / 2;
+
+    if (oneSided) {
+      const skippedSide = !sides.bid ? "BID" : "ASK";
+      console.log(`  One-sided: skipping ${skippedSide} for ${market.question.slice(0, 40)}... (trend: ${trend})`);
+    }
+
+    // Enforce rewardsMaxSpread: pass maxSpread to calculator
+    const maxSpreadCents = market.maxSpread > 0 ? market.maxSpread * 100 : undefined;
 
     const prices = calculateSafePrices(
       market.midpoint,
@@ -119,6 +141,7 @@ export async function placeOrdersForMarkets(
       market.tickSize,
       market.tokenIdYes,
       market.tokenIdNo,
+      maxSpreadCents,
     );
 
     if (!prices) {
@@ -132,7 +155,9 @@ export async function placeOrdersForMarkets(
     const bidSize = sharesToBuy(perSideUsdc, prices.bidPrice);
     const bidCost = prices.bidPrice * bidSize;
 
-    if (bidSize < effectiveMinSize) {
+    if (!sides.bid) {
+      // Trend says skip BID
+    } else if (bidSize < effectiveMinSize) {
       console.log(
         `  Skip BID: ${bidSize.toFixed(2)} shares < min ${effectiveMinSize} ` +
         `($${perSideUsdc.toFixed(2)} @ ${prices.bidPrice.toFixed(2)})`,
@@ -189,7 +214,9 @@ export async function placeOrdersForMarkets(
     const askSize = sharesToBuy(perSideUsdc, 1 - prices.askPrice);
     const askCost = (1 - prices.askPrice) * askSize;
 
-    if (askSize < effectiveMinSize) {
+    if (!sides.ask) {
+      // Trend says skip ASK
+    } else if (askSize < effectiveMinSize) {
       console.log(
         `  Skip ASK: ${askSize.toFixed(2)} shares < min ${effectiveMinSize} ` +
         `($${perSideUsdc.toFixed(2)} @ ${prices.askPrice.toFixed(2)})`,

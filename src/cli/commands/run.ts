@@ -3,10 +3,10 @@ import chalk from "chalk";
 import { loadEnv } from "../../utils/config.js";
 import { createDatabase, PolyfarmDb } from "../../db/database.js";
 import { deriveOrLoadCreds } from "../../auth/credentials.js";
-import { fetchGammaMarkets } from "../../discovery/gamma.js";
-import { 
-  filterRewardMarkets, 
-  allocateCapitalSmart, 
+import { fetchGammaMarkets, type GammaMarket } from "../../discovery/gamma.js";
+import {
+  filterRewardMarkets,
+  allocateCapitalSmart,
   shouldRebalance,
   type RewardMarket,
   type AllocationResult,
@@ -15,6 +15,9 @@ import { placeOrdersForMarkets } from "../../orders/placer.js";
 import { cancelAllOrders, panicCancelAll, gracefulShutdown } from "../../orders/lifecycle.js";
 import { WsConnectionManager } from "../../safety/websocket.js";
 import { SafetyMonitor } from "../../safety/monitor.js";
+import { detectTrend, type TrendDirection } from "../../intelligence/trend.js";
+import { FillDetector, type FillEvent } from "../../hedge/detector.js";
+import { executeHedge } from "../../hedge/executor.js";
 import type { ClobClient } from "@polymarket/clob-client";
 
 export const runCommand = new Command("run")
@@ -22,12 +25,18 @@ export const runCommand = new Command("run")
   .requiredOption("--budget <usdc>", "Total USDC budget to deploy")
   .option("--spread <cents>", "Distance from midpoint in cents", "5")
   .option("--max-markets <n>", "Maximum number of markets", "10")
-  .option("--danger-zone <cents>", "Danger zone distance in cents", "2")
+  .option("--danger-zone <cents>", "Danger zone distance in cents", "3")
   .option("--min-size <shares>", "Override minimum order size (default: from API)")
   .option("--rebalance-interval <minutes>", "Check for better markets every N minutes (0 to disable)", "60")
   .option("--min-daily-yield <percent>", "Minimum daily yield % to consider", "0")
   .option("--min-rebalance-improvement <percent>", "Minimum profitability improvement to trigger rebalance", "20")
   .option("--no-smart-allocation", "Use equal allocation instead of profitability-weighted")
+  .option("--hedge-fills", "Enable hedge-on-fill (default: enabled)", true)
+  .option("--no-hedge-fills", "Disable hedge-on-fill")
+  .option("--max-hedge-cost <cents>", "Max extra cents for hedge buy", "5")
+  .option("--max-volatility <cents>", "Skip markets with >N cents 24h change", "5")
+  .option("--placement-mode <mode>", "adaptive | bid-only | ask-only | both", "adaptive")
+  .option("--warmup-seconds <s>", "Collect WS data before placing orders", "5")
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);
@@ -38,6 +47,11 @@ export const runCommand = new Command("run")
     const minDailyYield = parseFloat(opts.minDailyYield);
     const minRebalanceImprovement = parseFloat(opts.minRebalanceImprovement);
     const useSmartAllocation = opts.smartAllocation !== false;
+    const hedgeFills = opts.hedgeFills !== false;
+    const maxHedgeCostCents = parseFloat(opts.maxHedgeCost);
+    const maxVolatilityCents = parseFloat(opts.maxVolatility);
+    const placementMode: string = opts.placementMode;
+    const warmupSeconds = parseInt(opts.warmupSeconds);
 
     if (isNaN(budget) || budget <= 0) {
       console.error(chalk.red("--budget must be a positive number"));
@@ -46,6 +60,7 @@ export const runCommand = new Command("run")
 
     let rawDb: ReturnType<typeof createDatabase> | null = null;
     let monitor: SafetyMonitor | null = null;
+    let fillDetector: FillDetector | null = null;
     let rebalanceInterval: NodeJS.Timeout | null = null;
     let currentMarkets: RewardMarket[] = [];
 
@@ -59,6 +74,10 @@ export const runCommand = new Command("run")
       console.log(`  Spread: ${spreadCents}c from midpoint`);
       console.log(`  Danger zone: ${dangerZoneCents}c`);
       console.log(`  Smart allocation: ${useSmartAllocation ? chalk.green("ON") : chalk.yellow("OFF")}`);
+      console.log(`  Hedge fills: ${hedgeFills ? chalk.green("ON") : chalk.yellow("OFF")}`);
+      console.log(`  Placement mode: ${placementMode}`);
+      console.log(`  Max volatility: ${maxVolatilityCents}c`);
+      console.log(`  WS warmup: ${warmupSeconds}s`);
       if (minDailyYield > 0) {
         console.log(`  Min daily yield: ${minDailyYield}%`);
       }
@@ -84,32 +103,132 @@ export const runCommand = new Command("run")
           console.log(chalk.dim("Stale orders cancelled."));
         } catch (err) {
           console.log(chalk.yellow(`Warning: failed to cancel stale orders: ${(err as Error).message}`));
-          // Mark them cancelled in DB anyway so they don't confuse us
           db.cancelAllOrders();
         }
       }
 
+      // ───────────────────────────────────────────────────
+      // WS-FIRST: Start WebSocket + SafetyMonitor BEFORE placing orders
+      // ───────────────────────────────────────────────────
+      console.log(chalk.bold("Starting safety monitor (WS-first)..."));
+      const wsManager = new WsConnectionManager();
+      monitor = new SafetyMonitor(auth.clobClient, db, wsManager, {
+        dangerZoneCents,
+      });
+
+      // Monitor events
+      monitor.on("midpoint", () => {
+        // Quiet update — midpoints collected during warmup
+      });
+
+      monitor.on("warning", ({ orderId, orderPrice, midpoint, distance }: { orderId: string; orderPrice: number; midpoint: number; distance: number }) => {
+        console.log(
+          chalk.yellow(
+            `WARNING: Order ${orderId.slice(0, 8)}... @ ${orderPrice.toFixed(2)} ` +
+              `within ${(distance * 100).toFixed(1)}c of midpoint ${midpoint.toFixed(2)} (yellow zone)`,
+          ),
+        );
+      });
+
+      monitor.on("danger", ({ orderId, orderPrice, midpoint, distance }: { orderId: string; orderPrice: number; midpoint: number; distance: number }) => {
+        console.log(
+          chalk.red(
+            `DANGER: Order ${orderId.slice(0, 8)}... @ ${orderPrice.toFixed(2)} ` +
+              `within ${(distance * 100).toFixed(1)}c of midpoint ${midpoint.toFixed(2)} (red zone)`,
+          ),
+        );
+      });
+
+      monitor.on("cancelled", ({ orderId, latencyMs }: { orderId: string; latencyMs: number }) => {
+        console.log(
+          chalk.red(`CANCELLED: ${orderId.slice(0, 8)}... (${latencyMs}ms)`),
+        );
+      });
+
+      monitor.on("slow_cancel", ({ orderId, latencyMs }: { orderId: string; latencyMs: number }) => {
+        console.log(
+          chalk.red.bold(`SLOW CANCEL: ${orderId.slice(0, 8)}... took ${latencyMs}ms (>200ms)`),
+        );
+      });
+
+      monitor.on("panic", async (err: Error) => {
+        console.log(chalk.red.bold(`\nPANIC: ${err.message}`));
+        console.log("Cancelling all orders...");
+        try {
+          await panicCancelAll(auth.clobClient, db, sessionId);
+          console.log(chalk.green("All orders cancelled via API"));
+        } catch (cancelErr) {
+          console.error(chalk.red("Failed to cancel orders!"), cancelErr);
+        }
+        process.exit(1);
+      });
+
+      monitor.start();
+      console.log(chalk.green("Safety monitor active.\n"));
+
+      // Warm up: wait for WS midpoints to populate
+      console.log(chalk.dim(`Warming up WebSocket for ${warmupSeconds}s...`));
+      await new Promise((r) => setTimeout(r, warmupSeconds * 1000));
+
       /**
-       * Discover and select markets based on profitability
+       * Compute trends for markets based on Gamma API volatility fields
        */
-      async function discoverAndAllocate(): Promise<{ 
-        markets: RewardMarket[]; 
+      function computeTrends(
+        gammaMarkets: GammaMarket[],
+        markets: RewardMarket[],
+      ): Map<string, TrendDirection> {
+        const trendMap = new Map<string, TrendDirection>();
+        const gammaMap = new Map<string, GammaMarket>();
+        for (const g of gammaMarkets) {
+          gammaMap.set(g.conditionId, g);
+        }
+
+        for (const market of markets) {
+          if (placementMode === "bid-only") {
+            trendMap.set(market.conditionId, "DOWN");
+          } else if (placementMode === "ask-only") {
+            trendMap.set(market.conditionId, "UP");
+          } else if (placementMode === "both") {
+            trendMap.set(market.conditionId, "SIDEWAYS");
+          } else {
+            // adaptive: use trend detection
+            const gamma = gammaMap.get(market.conditionId);
+            if (gamma) {
+              const trend = detectTrend(gamma.oneHourPriceChange, gamma.oneDayPriceChange);
+              trendMap.set(market.conditionId, trend);
+            } else {
+              trendMap.set(market.conditionId, "SIDEWAYS");
+            }
+          }
+        }
+        return trendMap;
+      }
+
+      /**
+       * Discover and select markets based on profitability + stability
+       */
+      async function discoverAndAllocate(): Promise<{
+        markets: RewardMarket[];
         allocations: AllocationResult[];
+        gammaMarkets: GammaMarket[];
       }> {
         const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
         const rewardMarkets = filterRewardMarkets(gammaMarkets, {
           minDailyYield,
           sortByProfitability: true,
           spreadCents,
+          maxVolatilityCents,
         });
 
+        if (rewardMarkets.length === 0 && gammaMarkets.length > 0) {
+          console.log(chalk.yellow("All markets filtered out by stability/volatility checks."));
+        }
+
         if (useSmartAllocation) {
-          // Smart allocation based on profitability
           const allocations = allocateCapitalSmart(rewardMarkets, budget, maxMarkets);
           const markets = allocations.map(a => a.market);
-          return { markets, allocations };
+          return { markets, allocations, gammaMarkets };
         } else {
-          // Equal allocation (legacy behavior)
           const perSideMax = budget / 2;
           const affordable = rewardMarkets.filter((m) => {
             const minShares = minSizeOverride ?? m.minSize;
@@ -117,21 +236,20 @@ export const runCommand = new Command("run")
             return costPerSide <= perSideMax;
           });
           const markets = (affordable.length > 0 ? affordable : rewardMarkets).slice(0, maxMarkets);
-          return { markets, allocations: [] };
+          return { markets, allocations: [], gammaMarkets };
         }
       }
 
       /**
-       * Place orders for selected markets
+       * Place orders for selected markets with trend-aware one-sided placement
        */
       async function deployCapital(
         markets: RewardMarket[],
         allocations: AllocationResult[],
+        trendByMarket?: Map<string, TrendDirection>,
       ): Promise<number> {
         console.log("Placing orders...");
-        
-        // If we have allocations, use them for capital distribution
-        // Otherwise fall back to equal distribution
+
         const placed = await placeOrdersForMarkets(
           auth.clobClient,
           db,
@@ -140,6 +258,7 @@ export const runCommand = new Command("run")
           spreadCents,
           minSizeOverride,
           useSmartAllocation ? allocations : undefined,
+          trendByMarket,
         );
 
         for (const order of placed) {
@@ -157,13 +276,14 @@ export const runCommand = new Command("run")
        * Cancel all current orders and redeploy to new markets
        */
       async function performRebalance(): Promise<void> {
-        console.log(chalk.bold("\n🔄 Checking for rebalancing opportunities..."));
-        
+        console.log(chalk.bold("\nChecking for rebalancing opportunities..."));
+
         const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
         const allRewardMarkets = filterRewardMarkets(gammaMarkets, {
           minDailyYield,
           sortByProfitability: true,
           spreadCents,
+          maxVolatilityCents,
         });
 
         const decision = shouldRebalance(
@@ -194,16 +314,19 @@ export const runCommand = new Command("run")
         }
 
         // Rediscover and allocate with fresh data
-        const { markets, allocations } = await discoverAndAllocate();
-        
+        const { markets, allocations, gammaMarkets: freshGamma } = await discoverAndAllocate();
+
         if (markets.length === 0) {
           console.log(chalk.yellow("  No markets available after rebalance. Keeping position flat."));
           currentMarkets = [];
           return;
         }
 
+        // Compute trends for new markets
+        const trendByMarket = computeTrends(freshGamma, markets);
+
         // Deploy to new markets
-        const orderCount = await deployCapital(markets, allocations);
+        const orderCount = await deployCapital(markets, allocations, trendByMarket);
         currentMarkets = markets;
 
         // Update monitor subscriptions and rebuild order index
@@ -219,20 +342,23 @@ export const runCommand = new Command("run")
         }
 
         console.log(chalk.green(`  Rebalanced: ${orderCount} orders across ${markets.length} markets\n`));
-        
-        // Log expected daily earnings
+
         if (allocations.length > 0) {
           const totalDaily = allocations.reduce((sum, a) => sum + a.expectedDailyReward, 0);
           console.log(chalk.dim(`  Expected: $${totalDaily.toFixed(2)}/day`));
         }
       }
 
-      // Initial discovery
-      console.log("Discovering reward markets...");
-      const { markets: targetMarkets, allocations } = await discoverAndAllocate();
+      // ───────────────────────────────────────────────────
+      // DISCOVERY + TREND DETECTION
+      // ───────────────────────────────────────────────────
+      console.log("Discovering reward markets (with stability filtering)...");
+      const { markets: targetMarkets, allocations, gammaMarkets } = await discoverAndAllocate();
 
       if (targetMarkets.length === 0) {
         console.log(chalk.yellow("No reward markets found. Exiting."));
+        monitor.stop();
+        rawDb?.close();
         return;
       }
 
@@ -244,7 +370,8 @@ export const runCommand = new Command("run")
         for (const alloc of allocations.slice(0, 5)) {
           console.log(chalk.dim(
             `  ${alloc.market.question.slice(0, 40)}... ` +
-            `$${alloc.allocatedUsdc.toFixed(0)} → $${alloc.expectedDailyReward.toFixed(2)}/day`
+            `$${alloc.allocatedUsdc.toFixed(0)} -> $${alloc.expectedDailyReward.toFixed(2)}/day ` +
+            `(stability: ${(alloc.market.stabilityScore * 100).toFixed(0)}%)`
           ));
         }
         if (allocations.length > 5) {
@@ -258,26 +385,24 @@ export const runCommand = new Command("run")
         ));
       }
 
+      // Compute trends
+      const trendByMarket = computeTrends(gammaMarkets, targetMarkets);
+      for (const [conditionId, trend] of trendByMarket) {
+        if (trend !== "SIDEWAYS") {
+          const market = targetMarkets.find(m => m.conditionId === conditionId);
+          if (market) {
+            console.log(chalk.dim(`  Trend: ${market.question.slice(0, 40)}... → ${trend}`));
+          }
+        }
+      }
+
       currentMarkets = targetMarkets;
 
       // Start session
       const sessionId = db.startSession(budget, spreadCents);
       db.updateSessionStats(sessionId, { markets_count: targetMarkets.length });
 
-      // Deploy capital
-      const placedCount = await deployCapital(targetMarkets, allocations);
-
-      console.log(chalk.green(`Placed ${placedCount} orders across ${targetMarkets.length} markets\n`));
-      db.updateSessionStats(sessionId, { orders_placed: placedCount });
-
-      // Start safety monitor (rebuildOrderIndex is called automatically in start())
-      console.log(chalk.bold("\nStarting safety monitor..."));
-      const wsManager = new WsConnectionManager();
-      monitor = new SafetyMonitor(auth.clobClient, db, wsManager, {
-        dangerZoneCents,
-      });
-
-      // Subscribe to all market tokens
+      // Subscribe monitor to all market tokens
       const subscribedTokens = new Set<string>();
       for (const market of targetMarkets) {
         if (!subscribedTokens.has(market.tokenIdYes)) {
@@ -286,81 +411,145 @@ export const runCommand = new Command("run")
         }
       }
 
-      // Monitor events
-      monitor.on("midpoint", ({ assetId, midpoint }) => {
-        // Quiet update, only log on changes
-      });
+      // ───────────────────────────────────────────────────
+      // DEPLOY CAPITAL (one-sided based on trend)
+      // ───────────────────────────────────────────────────
+      const placedCount = await deployCapital(targetMarkets, allocations, trendByMarket);
 
-      monitor.on("danger", ({ orderId, orderPrice, midpoint, distance }) => {
-        console.log(
-          chalk.yellow(
-            `DANGER: Order ${orderId.slice(0, 8)}... @ ${orderPrice.toFixed(2)} ` +
-              `within ${(distance * 100).toFixed(1)}c of midpoint ${midpoint.toFixed(2)}`,
-          ),
-        );
-      });
+      console.log(chalk.green(`Placed ${placedCount} orders across ${targetMarkets.length} markets\n`));
+      db.updateSessionStats(sessionId, { orders_placed: placedCount });
 
-      monitor.on("cancelled", ({ orderId, latencyMs }) => {
-        console.log(
-          chalk.red(`CANCELLED: ${orderId.slice(0, 8)}... (${latencyMs}ms)`),
-        );
-        db.incrementCancelled(sessionId);
-      });
+      // Rebuild order index now that orders are placed
+      monitor.rebuildOrderIndex();
 
-      monitor.on("slow_cancel", ({ orderId, latencyMs }) => {
-        console.log(
-          chalk.red.bold(`SLOW CANCEL: ${orderId.slice(0, 8)}... took ${latencyMs}ms (>200ms)`),
-        );
-      });
+      // ───────────────────────────────────────────────────
+      // FILL DETECTOR (hedge-on-fill)
+      // ───────────────────────────────────────────────────
+      if (hedgeFills) {
+        fillDetector = new FillDetector(auth.clobClient, db);
 
-      monitor.on("panic", async (err: Error) => {
-        console.log(chalk.red.bold(`\nPANIC: ${err.message}`));
-        console.log("Cancelling all orders...");
-        try {
-          await panicCancelAll(auth.clobClient, db, sessionId);
-          console.log(chalk.green("All orders cancelled via API"));
-        } catch (cancelErr) {
-          console.error(chalk.red("Failed to cancel orders!"), cancelErr);
-        }
-        process.exit(1);
-      });
+        fillDetector.on("fill", async (fill: FillEvent) => {
+          console.log(
+            chalk.yellow.bold(
+              `\nFILL DETECTED: ${fill.side} ${fill.filledSize.toFixed(2)} @ ${fill.filledPrice.toFixed(2)} ` +
+              `[order: ${fill.orderId.slice(0, 8)}...]`
+            ),
+          );
 
-      monitor.start();
-      console.log(chalk.green("Safety monitor active. Press Ctrl+C to stop.\n"));
+          // 1. Update order fill in DB
+          db.updateOrderFill(fill.orderId, fill.filledSize);
+          db.incrementFilled(sessionId);
 
-      // Heartbeat loop (keep orders alive — server timeout is 10s)
-      // NOTE: The SDK's HTTP helpers return errors as { error: "..." } instead of throwing.
-      // We must check response.error BEFORE using response.heartbeat_id.
+          // 2. Cancel counterpart orders to prevent double exposure
+          if (monitor) {
+            const cancelled = await monitor.cancelCounterpartOrders(fill.conditionId, fill.side);
+            if (cancelled.length > 0) {
+              console.log(chalk.dim(`  Cancelled ${cancelled.length} counterpart order(s)`));
+              db.incrementCancelled(sessionId, cancelled.length);
+            }
+          }
+
+          // 3. Insert pending hedge record
+          const hedgeId = db.insertHedge({
+            trade_id: fill.tradeId,
+            order_id: fill.orderId,
+            condition_id: fill.conditionId,
+            fill_side: fill.side,
+            fill_size: fill.filledSize,
+            fill_price: fill.filledPrice,
+            status: "PENDING",
+          });
+
+          // 4. Execute hedge (buy opposite + merge)
+          try {
+            const result = await executeHedge(
+              auth.clobClient,
+              auth.wallet,
+              env,
+              db,
+              fill,
+              { maxHedgeCostCents: maxHedgeCostCents },
+            );
+
+            // 5. Update hedge record
+            db.updateHedge({
+              id: hedgeId,
+              hedge_order_id: result.hedgeOrderId,
+              hedge_price: result.hedgePrice,
+              hedge_size: result.hedgeSize,
+              merge_amount: result.mergeAmount,
+              merge_tx_hash: result.mergeTxHash,
+              pnl_cents: result.pnlCents,
+              status: result.status,
+            });
+
+            // 6. Log result with color coding
+            if (result.status === "HEDGED") {
+              const pnlColor = result.pnlCents >= 0 ? chalk.green : chalk.red;
+              console.log(
+                chalk.green(`  HEDGED: `) +
+                `bought opposite @ ${result.hedgePrice?.toFixed(2) ?? "?"} ` +
+                `merged: ${result.mergeAmount.toFixed(2)} ` +
+                pnlColor(`P&L: ${result.pnlCents >= 0 ? "+" : ""}${result.pnlCents.toFixed(1)}c`) +
+                (result.mergeTxHash ? chalk.dim(` [tx: ${result.mergeTxHash.slice(0, 10)}...]`) : ""),
+              );
+            } else {
+              console.log(chalk.red(`  Hedge ${result.status}: fill exposure remains`));
+            }
+          } catch (err) {
+            console.error(chalk.red(`  Hedge error: ${(err as Error).message}`));
+            db.updateHedge({
+              id: hedgeId,
+              hedge_order_id: null,
+              hedge_price: null,
+              hedge_size: 0,
+              merge_amount: 0,
+              merge_tx_hash: null,
+              pnl_cents: 0,
+              status: "HEDGE_FAILED",
+            });
+          }
+        });
+
+        fillDetector.on("poll_error", (err: Error) => {
+          console.log(chalk.dim(`Fill poll error: ${err.message}`));
+        });
+
+        fillDetector.start();
+        console.log(chalk.green("Fill detector active (polling every 5s).\n"));
+      } else {
+        console.log(chalk.dim("Hedge-on-fill disabled.\n"));
+      }
+
+      console.log(chalk.green("Press Ctrl+C to stop.\n"));
+
+      // ───────────────────────────────────────────────────
+      // HEARTBEAT LOOP
+      // ───────────────────────────────────────────────────
       let heartbeatFailures = 0;
-      // API expects "" (empty string) for first heartbeat, NOT null.
-      // SDK does `heartbeatId ?? null` — empty string passes through correctly.
       let heartbeatId: string = "";
       let consecutiveChainFailures = 0;
       let heartbeatLoggedFirstSuccess = false;
       let lastHeartbeatLogTime = 0;
       const MAX_HEARTBEAT_FAILURES = 5;
-      const MAX_CHAIN_FAILURES = 3; // After 3 chain failures, restart with empty string
-      const HEARTBEAT_INTERVAL_MS = 5000; // 5s for safety margin against 10s server timeout
-      const HEARTBEAT_LOG_INTERVAL_MS = 60_000; // Log status once per minute
+      const MAX_CHAIN_FAILURES = 3;
+      const HEARTBEAT_INTERVAL_MS = 5000;
+      const HEARTBEAT_LOG_INTERVAL_MS = 60_000;
       const heartbeatInterval = setInterval(async () => {
         try {
-          // If chaining has failed repeatedly, fall back to always starting fresh
           const sendId = consecutiveChainFailures >= MAX_CHAIN_FAILURES ? "" : heartbeatId;
           const response = await auth.clobClient.postHeartbeat(sendId) as
             { heartbeat_id?: string; error?: string };
 
-          // SDK returns errors as values, not exceptions
           if (response.error) {
             const errMsg = response.error;
             if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
               if (consecutiveChainFailures >= MAX_CHAIN_FAILURES) {
-                // Already in fallback mode and even "" is rejected — this is a real failure
                 heartbeatFailures++;
                 if (heartbeatFailures === 1) {
                   console.log(chalk.yellow("Heartbeat: fresh start also rejected — API may require auth refresh"));
                 }
               } else {
-                // Chain expired or invalid — start fresh with empty string
                 consecutiveChainFailures++;
                 heartbeatId = "";
                 if (consecutiveChainFailures === MAX_CHAIN_FAILURES) {
@@ -369,30 +558,25 @@ export const runCommand = new Command("run")
               }
               return;
             }
-            // Other API errors
             heartbeatFailures++;
             console.log(chalk.yellow(`Heartbeat error (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
             console.log(chalk.dim(`  Response: ${JSON.stringify(response)}`));
           } else if (response.heartbeat_id) {
-            // Success — store the chained ID
             heartbeatId = response.heartbeat_id;
             heartbeatFailures = 0;
             consecutiveChainFailures = 0;
 
-            // Debug: log first success response
             if (!heartbeatLoggedFirstSuccess) {
               heartbeatLoggedFirstSuccess = true;
               console.log(chalk.dim(`Heartbeat OK: ${JSON.stringify(response)}`));
             }
 
-            // Periodic status log (once per minute)
             const now = Date.now();
             if (now - lastHeartbeatLogTime >= HEARTBEAT_LOG_INTERVAL_MS) {
               lastHeartbeatLogTime = now;
               console.log(chalk.dim(`Heartbeat alive (id: ${heartbeatId.slice(0, 8)}...)`));
             }
           } else {
-            // Unexpected response shape
             heartbeatFailures++;
             console.log(chalk.yellow(`Heartbeat unexpected response (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${JSON.stringify(response)}`));
           }
@@ -402,7 +586,6 @@ export const runCommand = new Command("run")
             monitor?.emit("panic", new Error("Heartbeat failed repeatedly"));
           }
         } catch (err) {
-          // Genuine exceptions (network timeout, etc.)
           heartbeatFailures++;
           const errMsg = (err as Error).message || String(err);
           console.log(chalk.yellow(`Heartbeat exception (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
@@ -413,11 +596,13 @@ export const runCommand = new Command("run")
         }
       }, HEARTBEAT_INTERVAL_MS);
 
-      // Rebalancing loop (check for better markets periodically)
+      // ───────────────────────────────────────────────────
+      // REBALANCING LOOP
+      // ───────────────────────────────────────────────────
       if (rebalanceIntervalMin > 0) {
         const REBALANCE_INTERVAL_MS = rebalanceIntervalMin * 60 * 1000;
         console.log(chalk.dim(`Next rebalance check in ${rebalanceIntervalMin} minutes`));
-        
+
         rebalanceInterval = setInterval(async () => {
           try {
             await performRebalance();
@@ -427,11 +612,14 @@ export const runCommand = new Command("run")
         }, REBALANCE_INTERVAL_MS);
       }
 
-      // Graceful shutdown
+      // ───────────────────────────────────────────────────
+      // GRACEFUL SHUTDOWN
+      // ───────────────────────────────────────────────────
       const shutdown = async (signal: string) => {
         console.log(chalk.bold(`\n${signal} received. Shutting down gracefully...`));
         clearInterval(heartbeatInterval);
         if (rebalanceInterval) clearInterval(rebalanceInterval);
+        fillDetector?.stop();
         monitor?.stop();
 
         console.log("Cancelling all live orders...");
@@ -454,6 +642,7 @@ export const runCommand = new Command("run")
       await new Promise(() => {});
     } catch (err) {
       console.error(chalk.red(`\nError: ${(err as Error).message}`));
+      fillDetector?.stop();
       monitor?.stop();
       rawDb?.close();
       process.exit(1);
