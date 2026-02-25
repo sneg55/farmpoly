@@ -126,6 +126,9 @@ export const runCommand = new Command("run")
       // ───────────────────────────────────────────────────
       console.log(chalk.bold("Starting safety monitor (WS-first)..."));
       const wsManager = new WsConnectionManager();
+      wsManager.on("ws_error", (err: Error) => {
+        console.log(chalk.dim(`[WS] connection error: ${err.message.slice(0, 80)}`));
+      });
       monitor = new SafetyMonitor(auth.clobClient, db, wsManager, {
         dangerZoneCents,
       });

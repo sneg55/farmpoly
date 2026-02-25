@@ -90,7 +90,10 @@ export class WsConnectionManager extends EventEmitter {
     });
 
     this.ws.on("error", (err: Error) => {
-      this.emit("error", err);
+      // Emit as 'ws_error' to avoid Node.js EventEmitter special 'error' behavior
+      // (unhandled 'error' events crash the process). Connection errors are expected
+      // during DNS failures, network issues etc. — the 'close' handler will reconnect.
+      this.emit("ws_error", err);
     });
 
     this.ws.on("pong", () => {
