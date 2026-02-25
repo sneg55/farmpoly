@@ -147,6 +147,54 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 
 **Files**: `src/orders/placer.ts`
 
+## Phase 11: Deploy + ASK Order Fix (GitHub Issues #4, #5) `[bugfix:reproduce-first]`
+
+> **Ref**: [GitHub Issue #4](https://github.com/sneg55/farmpoly/issues/4), [GitHub Issue #5](https://github.com/sneg55/farmpoly/issues/5)
+> **Context**: Phases 9+10 fixes are committed but NOT deployed. Server is running pre-Phase 9 image.
+> Issue #5 confirms: heartbeat self-recovered after ~9h, but ASK orders still fail with "not enough balance / allowance" — this is the ERC1155 approval issue from 9.1.
+
+### 11.1 Fix GHCR auth + redeploy latest image — cc:TODO
+
+**Problem**: `docker pull ghcr.io/sneg55/farmpoly:latest` fails with "denied" on Helsinki server. The PAT stored in `/root/.docker/config.json` may have expired.
+
+**Fix**:
+1. Generate a new GHCR PAT (or reuse existing) with `read:packages` scope
+2. `docker login ghcr.io` on the server
+3. Pull latest image and restart container
+4. Verify new logs show Phase 10 code (heartbeat `""`, budget epsilon)
+
+**Files**: Server-side only (SSH)
+
+### 11.2 Run `polyfarm init --approve` to grant ERC1155 approvals — cc:TODO
+
+**Problem**: Phase 9.1 added `checkConditionalTokenApproval` + `approveConditionalTokens` to the code, and `polyfarm init --approve` now calls them. But the on-chain `setApprovalForAll` transactions were never sent because the new code hasn't been deployed+run yet.
+
+**Fix**:
+1. After 11.1 deploys the new image, exec into the container
+2. Run `polyfarm init --approve`
+3. Verify 3 `setApprovalForAll` transactions are sent to ConditionalTokens contract for: CTF Exchange, NegRisk Exchange, NegRisk Adapter
+4. Verify output shows "ConditionalTokens approved for all spenders"
+
+**Files**: Server-side only (SSH + docker exec)
+
+### 11.3 Restart daemon and verify BID+ASK both place — cc:TODO
+
+**Problem**: After approvals are granted, restart the daemon and verify both BID and ASK orders succeed.
+
+**Verification**:
+1. Restart container with `polyfarm run --budget 100 --spread 5`
+2. Check logs: both BID and ASK orders should appear (no "Skip ASK" or "Failed ASK")
+3. Verify heartbeat shows `Heartbeat OK: {...}` on first attempt (not errors)
+4. Confirm expected earnings doubled (~$10-12/day from both sides)
+
+**Files**: Server-side only (SSH)
+
+### 11.4 Close GitHub issues #4 and #5 with resolution notes — cc:TODO
+
+**Fix**: After 11.3 is verified, close both issues with a comment summarizing the root causes and fixes.
+
+**Files**: GitHub CLI
+
 ---
 
 ## Known Issues
