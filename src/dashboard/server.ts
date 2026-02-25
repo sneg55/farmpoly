@@ -97,11 +97,22 @@ function freshPayload(db: PolyfarmDb): string {
     const isTwoSided = hasBuy && hasSell;
 
     // Calculate effective spread from orders
+    // Two-sided: use bid-ask spread. One-sided: use distance from midpoint.
     const buyOrders = mktOrders.filter((o) => o.side === "BUY");
     const sellOrders = mktOrders.filter((o) => o.side === "SELL");
-    const bestBid = buyOrders.length > 0 ? Math.max(...buyOrders.map((o) => o.price)) : 0;
-    const bestAsk = sellOrders.length > 0 ? Math.min(...sellOrders.map((o) => o.price)) : 1;
-    const effectiveSpread = bestAsk - bestBid;
+    const mid = m.midpoint ?? 0.5;
+    let effectiveSpread: number;
+    if (buyOrders.length > 0 && sellOrders.length > 0) {
+      const bestBid = Math.max(...buyOrders.map((o) => o.price));
+      const bestAsk = Math.min(...sellOrders.map((o) => o.price));
+      effectiveSpread = bestAsk - bestBid;
+    } else if (buyOrders.length > 0) {
+      const bestBid = Math.max(...buyOrders.map((o) => o.price));
+      effectiveSpread = (mid - bestBid) * 2; // distance from midpoint, doubled for one-sided
+    } else {
+      const bestAsk = Math.min(...sellOrders.map((o) => o.price));
+      effectiveSpread = (bestAsk - mid) * 2;
+    }
 
     const spreadRatio = Math.min(effectiveSpread / MAX_SPREAD, 1);
     const spreadQuality = 1 - spreadRatio * spreadRatio;

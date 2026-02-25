@@ -145,7 +145,7 @@ export function dashboardHtml(): string {
 <div class="grid" id="stats">
   <div class="card">
     <div class="card-label">Status</div>
-    <div class="card-value" id="s-status"><span class="status-dot dot-none"></span>--</div>
+    <div class="card-value" id="s-status"><span class="status-dot dot-none"></span><span class="status-text">--</span></div>
   </div>
   <div class="card">
     <div class="card-label">Budget</div>
