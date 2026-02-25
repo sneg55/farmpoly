@@ -27,4 +27,4 @@ RUN mkdir -p /data
 ENV POLYFARM_DB_PATH=/data/polyfarm.db
 
 ENTRYPOINT ["node", "dist/cli/index.js"]
-CMD ["run", "--budget", "30", "--spread", "5", "--max-markets", "1"]
+CMD ["run", "--budget", "30", "--spread", "3", "--max-markets", "3", "--hedge-fills", "--placement-mode", "adaptive"]

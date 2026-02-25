@@ -108,18 +108,22 @@ jobs:
             EOF
             
             # Start new container
-            # NO-FILL STRATEGY: Wide spreads to avoid getting filled
-            # --spread 20: Place orders 20c from midpoint (safer than 5c)
-            # --danger-zone 5: Cancel orders if within 5c of midpoint
-            # --max-markets 5: Focus on fewer, safer markets
-            # --rebalance-interval 120: Check for calmer markets every 2h
+            # DEFENSIVE LIQUIDITY v2: Earn rewards with smart protection
+            # --spread 3: Target 3c from midpoint (clamped to market's rewardsMaxSpread)
+            # --danger-zone 3: Graduated response (yellow warning at 3c, red cancel at 1.5c)
+            # --max-markets 5: Focus on top 5 by profitability × stability
+            # --max-volatility 5: Skip markets with >5c 24h price change
+            # --placement-mode adaptive: One-sided orders based on trend detection
+            # --hedge-fills: Auto-hedge any fills (buy opposite + merge → ~$1 back)
+            # --warmup-seconds 5: Collect WS midpoints before placing orders
+            # --rebalance-interval 60: Re-score markets every hour
             docker run -d \
               --name polyfarm \
               --restart unless-stopped \
               -v /opt/farmpoly-data:/data \
               --env-file /opt/farmpoly/.env \
               ghcr.io/${{ github.repository }}:latest \
-              run --budget 100 --spread 20 --danger-zone 5 --max-markets 5 --rebalance-interval 120 --min-daily-yield 0.5
+              run --budget 100 --spread 3 --danger-zone 3 --max-markets 5 --max-volatility 5 --placement-mode adaptive --hedge-fills --warmup-seconds 5 --rebalance-interval 60 --min-daily-yield 0.5
             
             # Wait for container to start and verify it's running
             sleep 5
