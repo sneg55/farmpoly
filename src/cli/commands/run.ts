@@ -538,50 +538,39 @@ export const runCommand = new Command("run")
       // ───────────────────────────────────────────────────
       let heartbeatFailures = 0;
       let heartbeatId: string = "";
-      let consecutiveChainFailures = 0;
       let heartbeatLoggedFirstSuccess = false;
       let lastHeartbeatLogTime = 0;
       let heartbeatInFlight = false;
-      const MAX_HEARTBEAT_FAILURES = 5;
-      const MAX_CHAIN_FAILURES = 3;
+      let authRefreshAttempted = false;
+      const MAX_HEARTBEAT_FAILURES = 10;
       const HEARTBEAT_INTERVAL_MS = 5000;
       const HEARTBEAT_LOG_INTERVAL_MS = 60_000;
       const heartbeatInterval = setInterval(async () => {
         if (heartbeatInFlight) return; // skip if previous heartbeat still in-flight
         heartbeatInFlight = true;
         try {
-          const sendId = consecutiveChainFailures >= MAX_CHAIN_FAILURES ? "" : heartbeatId;
-          const response = await auth.clobClient.postHeartbeat(sendId) as
-            { heartbeat_id?: string; error?: string };
+          // The SDK's errorHandling returns { ...responseData, status } on HTTP errors,
+          // so a 400 "Invalid Heartbeat ID" response comes back as:
+          //   { error: "Invalid Heartbeat ID", heartbeat_id: "corrected-uuid", status: 400 }
+          // We must check for the corrected heartbeat_id even when error is present.
+          const response = await auth.clobClient.postHeartbeat(heartbeatId) as
+            { heartbeat_id?: string; error?: string; status?: number };
 
-          if (response.error) {
-            const errMsg = response.error;
-            if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
-              if (consecutiveChainFailures >= MAX_CHAIN_FAILURES) {
-                heartbeatFailures++;
-                if (heartbeatFailures === 1) {
-                  console.log(chalk.yellow("Heartbeat: fresh start also rejected — API may require auth refresh"));
-                }
-              } else {
-                consecutiveChainFailures++;
-                heartbeatId = "";
-                if (consecutiveChainFailures === MAX_CHAIN_FAILURES) {
-                  console.log(chalk.dim("Heartbeat chaining disabled after repeated failures (restarting each time)"));
-                }
-              }
-              return;
-            }
-            heartbeatFailures++;
-            console.log(chalk.yellow(`Heartbeat error (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
-            console.log(chalk.dim(`  Response: ${JSON.stringify(response)}`));
-          } else if (response.heartbeat_id) {
+          // Case 1: Response includes a heartbeat_id (success, or error with correction)
+          if (response.heartbeat_id) {
+            // Use the (corrected) ID for the next call — this handles both:
+            //   - Normal 200 success
+            //   - 400 "Invalid Heartbeat ID" with corrected ID in body
+            const wasError = !!response.error;
             heartbeatId = response.heartbeat_id;
             heartbeatFailures = 0;
-            consecutiveChainFailures = 0;
+            authRefreshAttempted = false;
 
-            if (!heartbeatLoggedFirstSuccess) {
+            if (wasError) {
+              console.log(chalk.dim(`Heartbeat recovered: used corrected ID from server (was: ${response.error})`));
+            } else if (!heartbeatLoggedFirstSuccess) {
               heartbeatLoggedFirstSuccess = true;
-              console.log(chalk.dim(`Heartbeat OK: ${JSON.stringify(response)}`));
+              console.log(chalk.dim(`Heartbeat OK (id: ${heartbeatId.slice(0, 8)}...)`));
             }
 
             const now = Date.now();
@@ -589,9 +578,45 @@ export const runCommand = new Command("run")
               lastHeartbeatLogTime = now;
               console.log(chalk.dim(`Heartbeat alive (id: ${heartbeatId.slice(0, 8)}...)`));
             }
-          } else {
+          }
+          // Case 2: Error WITHOUT a corrected heartbeat_id
+          else if (response.error) {
+            const errMsg = response.error;
+            const isInvalidId = errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat");
+
+            if (isInvalidId) {
+              // No corrected ID returned — reset to empty to start fresh chain
+              heartbeatId = "";
+              heartbeatFailures++;
+              console.log(chalk.yellow(
+                `Heartbeat invalid ID, resetting chain (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES})`
+              ));
+
+              // After several failures, try re-deriving API creds (they may have expired)
+              if (heartbeatFailures >= 3 && !authRefreshAttempted) {
+                authRefreshAttempted = true;
+                console.log(chalk.yellow("Heartbeat: attempting auth credential refresh..."));
+                try {
+                  const freshAuth = await deriveOrLoadCreds(env, db);
+                  // Swap the clobClient reference used by heartbeat
+                  auth.clobClient = freshAuth.clobClient;
+                  heartbeatId = "";
+                  console.log(chalk.green("Heartbeat: credentials refreshed, retrying..."));
+                } catch (refreshErr) {
+                  console.log(chalk.red(`Heartbeat: credential refresh failed: ${(refreshErr as Error).message}`));
+                }
+              }
+            } else {
+              heartbeatFailures++;
+              console.log(chalk.yellow(`Heartbeat error (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
+            }
+          }
+          // Case 3: Unexpected response shape (no error, no heartbeat_id)
+          else {
             heartbeatFailures++;
-            console.log(chalk.yellow(`Heartbeat unexpected response (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${JSON.stringify(response)}`));
+            console.log(chalk.yellow(
+              `Heartbeat unexpected response (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${JSON.stringify(response)}`
+            ));
           }
 
           if (heartbeatFailures >= MAX_HEARTBEAT_FAILURES) {

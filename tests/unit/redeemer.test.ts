@@ -5,30 +5,44 @@ const mockRedeemPositions = vi.fn();
 const mockWait = vi.fn().mockResolvedValue({});
 
 vi.mock("ethers", () => {
-  const BigNumber = {
-    from: (val: string | number) => {
-      const n = BigInt(val);
-      return {
-        _isBigNumber: true,
-        isZero: () => n === 0n,
-        toString: () => n.toString(),
-        _hex: "0x" + n.toString(16),
-        toHexString: () => "0x" + n.toString(16),
-        eq: (other: any) => n === BigInt(other.toString()),
-      };
-    },
+  const makeBN = (val: string | number | bigint) => {
+    const n = BigInt(val);
+    return {
+      _isBigNumber: true,
+      isZero: () => n === 0n,
+      toString: () => n.toString(),
+      _hex: "0x" + n.toString(16),
+      toHexString: () => "0x" + n.toString(16),
+      eq: (other: any) => n === BigInt(other.toString()),
+      gt: (other: any) => n > BigInt(other.toString()),
+      mul: (other: any) => makeBN(n * BigInt(other.toString())),
+      add: (other: any) => makeBN(n + BigInt(other.toString())),
+    };
+  };
+
+  const BigNumber = { from: makeBN };
+
+  const mockFeeData = {
+    maxPriorityFeePerGas: makeBN("35000000000"),  // 35 gwei
+    lastBaseFeePerGas: makeBN("30000000000"),      // 30 gwei
+    maxFeePerGas: makeBN("95000000000"),
   };
 
   class MockJsonRpcProvider {
     constructor() {}
+    getFeeData() { return Promise.resolve(mockFeeData); }
   }
 
   class MockContract {
     redeemPositions: any;
+    estimateGas: any;
     constructor() {
       this.redeemPositions = (...args: any[]) => {
         mockRedeemPositions(...args);
         return Promise.resolve({ hash: "0xmocktxhash", wait: mockWait });
+      };
+      this.estimateGas = {
+        redeemPositions: vi.fn().mockResolvedValue(makeBN("200000")),
       };
     }
   }
@@ -45,6 +59,15 @@ vi.mock("ethers", () => {
       BigNumber,
       constants: { HashZero: "0x" + "0".repeat(64) },
       providers: { JsonRpcProvider: MockJsonRpcProvider },
+      utils: {
+        parseUnits: (value: string, unit: string) => {
+          const decimals = unit === "gwei" ? 9 : unit === "ether" ? 18 : parseInt(unit, 10);
+          const parts = value.split(".");
+          const whole = parts[0];
+          const frac = (parts[1] || "").padEnd(decimals, "0").slice(0, decimals);
+          return makeBN(BigInt(whole + frac));
+        },
+      },
     },
   };
 });
@@ -77,13 +100,15 @@ describe("redeemPosition", () => {
     expect(result.negRisk).toBe(false);
     expect(result.conditionId).toBe("0xcondition123");
 
-    // Verify called with: collateralToken, parentCollectionId, conditionId, indexSets
-    expect(mockRedeemPositions).toHaveBeenCalledWith(
-      "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", // USDC
-      "0x" + "0".repeat(64), // HashZero
-      "0xcondition123",
-      [1, 2],
-    );
+    // Verify called with: collateralToken, parentCollectionId, conditionId, indexSets, gasOverrides
+    expect(mockRedeemPositions).toHaveBeenCalledTimes(1);
+    const callArgs = mockRedeemPositions.mock.calls[0];
+    expect(callArgs[0]).toBe("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"); // USDC
+    expect(callArgs[1]).toBe("0x" + "0".repeat(64)); // HashZero
+    expect(callArgs[2]).toBe("0xcondition123");
+    expect(callArgs[3]).toEqual([1, 2]);
+    // 5th arg is gasOverrides
+    expect(callArgs[4]).toHaveProperty("maxPriorityFeePerGas");
     expect(mockWait).toHaveBeenCalled();
   });
 
@@ -100,11 +125,12 @@ describe("redeemPosition", () => {
     expect(result.txHash).toBe("0xmocktxhash");
     expect(result.negRisk).toBe(true);
 
-    // Verify called with: conditionId, amounts array
+    // Verify called with: conditionId, amounts array, gasOverrides
     expect(mockRedeemPositions).toHaveBeenCalledTimes(1);
     const callArgs = mockRedeemPositions.mock.calls[0];
     expect(callArgs[0]).toBe("0xnegriskcondition");
     expect(callArgs[1]).toHaveLength(2);
+    expect(callArgs[2]).toHaveProperty("maxPriorityFeePerGas");
   });
 });
 
@@ -132,7 +158,7 @@ describe("redeemAll", () => {
     expect(result.skipped).toBe(1);
   });
 
-  it("handles failures via Promise.allSettled", async () => {
+  it("handles individual failures gracefully", async () => {
     let callCount = 0;
     mockRedeemPositions.mockImplementation(() => {
       callCount++;

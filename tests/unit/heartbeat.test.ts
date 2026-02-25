@@ -2,67 +2,71 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
  * Tests for heartbeat response handling logic.
- * The SDK's postHeartbeat() returns errors as values ({ error: "..." })
- * instead of throwing. This tests that our handler correctly distinguishes:
- * 1. Successful response with heartbeat_id
- * 2. Error returned as value (Invalid Heartbeat ID)
- * 3. Other API errors returned as value
- * 4. Genuine exceptions (network timeout)
- * 5. Fallback mode: after MAX_CHAIN_FAILURES, "Invalid" errors become real failures
+ *
+ * The SDK's postHeartbeat() returns errors as response values (not thrown).
+ * Crucially, the SDK's errorHandling() spreads the full response body on HTTP
+ * errors, so a 400 "Invalid Heartbeat ID" response comes back as:
+ *   { error: "Invalid Heartbeat ID", heartbeat_id: "corrected-uuid", status: 400 }
+ *
+ * The handler must:
+ * 1. Prefer heartbeat_id even when error is also present (corrected ID from server)
+ * 2. Only increment failures when there's NO corrected ID in the response
+ * 3. Reset to "" (fresh chain) when Invalid ID has no corrected ID
+ * 4. Count other API errors (Unauthorized, Server Error) as real failures
+ * 5. Handle genuine exceptions (network timeout) as real failures
  */
 
 interface HeartbeatResponse {
   heartbeat_id?: string;
   error?: string;
+  status?: number;
 }
 
 interface HeartbeatState {
   heartbeatId: string; // "" = fresh start (API expects empty string, not null)
   failures: number;
-  consecutiveChainFailures: number;
   shouldPanic: boolean;
   lastMessage: string | null;
 }
 
-const MAX_CHAIN_FAILURES = 3;
+const MAX_HEARTBEAT_FAILURES = 10;
 
 function handleHeartbeatResponse(
   response: HeartbeatResponse,
   state: HeartbeatState,
-  maxFailures: number = 5,
+  maxFailures: number = MAX_HEARTBEAT_FAILURES,
 ): HeartbeatState {
   const newState = { ...state, shouldPanic: false, lastMessage: null };
 
-  if (response.error) {
-    const errMsg = response.error;
-    if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
-      if (newState.consecutiveChainFailures >= MAX_CHAIN_FAILURES) {
-        // Already in fallback mode — even "" is rejected, count as real failure
-        newState.failures++;
-        newState.lastMessage = "fallback_rejected";
-      } else {
-        // Chain expired — reset to "", don't count as failure
-        newState.consecutiveChainFailures++;
-        newState.heartbeatId = "";
-        newState.lastMessage = "chain_expired";
-      }
-
-      if (newState.failures >= maxFailures) {
-        newState.shouldPanic = true;
-      }
-      return newState;
-    }
-    // Other API error
-    newState.failures++;
-    newState.lastMessage = errMsg;
-  } else if (response.heartbeat_id) {
-    // Success
+  // Case 1: Response includes a heartbeat_id (success, or error with correction)
+  if (response.heartbeat_id) {
     newState.heartbeatId = response.heartbeat_id;
     newState.failures = 0;
-    newState.consecutiveChainFailures = 0;
-    newState.lastMessage = null;
+    newState.lastMessage = response.error ? "recovered_with_corrected_id" : null;
+
+    if (newState.failures >= maxFailures) {
+      newState.shouldPanic = true;
+    }
+    return newState;
+  }
+
+  // Case 2: Error WITHOUT a corrected heartbeat_id
+  if (response.error) {
+    const errMsg = response.error;
+    const isInvalidId = errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat");
+
+    if (isInvalidId) {
+      // No corrected ID — reset to empty to start fresh chain
+      newState.heartbeatId = "";
+      newState.failures++;
+      newState.lastMessage = "invalid_id_reset";
+    } else {
+      // Other API error
+      newState.failures++;
+      newState.lastMessage = errMsg;
+    }
   } else {
-    // Unexpected shape
+    // Case 3: Unexpected shape (no error, no heartbeat_id)
     newState.failures++;
     newState.lastMessage = "unexpected_response";
   }
@@ -77,7 +81,7 @@ function handleHeartbeatResponse(
 function handleHeartbeatException(
   err: Error,
   state: HeartbeatState,
-  maxFailures: number = 5,
+  maxFailures: number = MAX_HEARTBEAT_FAILURES,
 ): HeartbeatState {
   const newState = { ...state, shouldPanic: false };
   newState.failures++;
@@ -92,7 +96,7 @@ describe("heartbeat response handling", () => {
   let state: HeartbeatState;
 
   beforeEach(() => {
-    state = { heartbeatId: "", failures: 0, consecutiveChainFailures: 0, shouldPanic: false, lastMessage: null };
+    state = { heartbeatId: "", failures: 0, shouldPanic: false, lastMessage: null };
   });
 
   it("initial heartbeatId is empty string (not null)", () => {
@@ -118,19 +122,32 @@ describe("heartbeat response handling", () => {
     expect(s.failures).toBe(0);
   });
 
-  it("resets heartbeatId to empty string on Invalid Heartbeat ID error (no failure count)", () => {
+  it("uses corrected heartbeat_id from error response (SDK spreads 400 body)", () => {
     state.heartbeatId = "stale-id";
     state.failures = 2;
+
+    // SDK returns { error: "...", heartbeat_id: "corrected", status: 400 }
+    const result = handleHeartbeatResponse(
+      { error: "Invalid Heartbeat ID", heartbeat_id: "corrected-uuid" },
+      state,
+    );
+    // Should use the corrected ID, NOT reset to ""
+    expect(result.heartbeatId).toBe("corrected-uuid");
+    expect(result.failures).toBe(0); // Success — resets failures
+    expect(result.shouldPanic).toBe(false);
+    expect(result.lastMessage).toBe("recovered_with_corrected_id");
+  });
+
+  it("resets to empty string when Invalid Heartbeat ID has no corrected ID", () => {
+    state.heartbeatId = "stale-id";
 
     const result = handleHeartbeatResponse(
       { error: "Invalid Heartbeat ID" },
       state,
     );
     expect(result.heartbeatId).toBe("");
-    expect(result.failures).toBe(2); // NOT incremented
-    expect(result.shouldPanic).toBe(false);
-    expect(result.lastMessage).toBe("chain_expired");
-    expect(result.consecutiveChainFailures).toBe(1);
+    expect(result.failures).toBe(1); // Counts as failure
+    expect(result.lastMessage).toBe("invalid_id_reset");
   });
 
   it("also handles lowercase invalid heartbeat", () => {
@@ -139,7 +156,8 @@ describe("heartbeat response handling", () => {
       state,
     );
     expect(result.heartbeatId).toBe("");
-    expect(result.lastMessage).toBe("chain_expired");
+    expect(result.failures).toBe(1);
+    expect(result.lastMessage).toBe("invalid_id_reset");
   });
 
   it("counts other API errors as failures", () => {
@@ -162,17 +180,17 @@ describe("heartbeat response handling", () => {
   });
 
   it("triggers panic after max failures", () => {
-    state.failures = 4;
+    state.failures = MAX_HEARTBEAT_FAILURES - 1;
     const result = handleHeartbeatResponse(
       { error: "Server Error" },
       state,
     );
-    expect(result.failures).toBe(5);
+    expect(result.failures).toBe(MAX_HEARTBEAT_FAILURES);
     expect(result.shouldPanic).toBe(true);
   });
 
   it("resets failure count on success after errors", () => {
-    state.failures = 4;
+    state.failures = 8;
     const result = handleHeartbeatResponse(
       { heartbeat_id: "recovered" },
       state,
@@ -180,15 +198,6 @@ describe("heartbeat response handling", () => {
     expect(result.failures).toBe(0);
     expect(result.shouldPanic).toBe(false);
     expect(result.heartbeatId).toBe("recovered");
-  });
-
-  it("success resets consecutiveChainFailures", () => {
-    state.consecutiveChainFailures = 2;
-    const result = handleHeartbeatResponse(
-      { heartbeat_id: "fresh" },
-      state,
-    );
-    expect(result.consecutiveChainFailures).toBe(0);
   });
 
   it("handles genuine exceptions (network timeout)", () => {
@@ -201,48 +210,53 @@ describe("heartbeat response handling", () => {
   });
 
   it("panics after max exception failures", () => {
-    state.failures = 4;
+    state.failures = MAX_HEARTBEAT_FAILURES - 1;
     const result = handleHeartbeatException(
       new Error("ECONNRESET"),
       state,
     );
-    expect(result.failures).toBe(5);
+    expect(result.failures).toBe(MAX_HEARTBEAT_FAILURES);
     expect(result.shouldPanic).toBe(true);
   });
 
-  it("does not double-count Invalid Heartbeat ID errors before fallback mode", () => {
-    // Simulate chain failures up to MAX_CHAIN_FAILURES — should never increment failures
+  it("corrected ID in error response prevents failure escalation", () => {
+    // Simulate repeated "Invalid Heartbeat ID" WITH corrected IDs
+    // This should never escalate failures — the server is helping us recover
     let s = state;
-    for (let i = 0; i < MAX_CHAIN_FAILURES; i++) {
-      s = handleHeartbeatResponse({ error: "Invalid Heartbeat ID" }, s);
+    for (let i = 0; i < 20; i++) {
+      s = handleHeartbeatResponse(
+        { error: "Invalid Heartbeat ID", heartbeat_id: `corrected-${i}` },
+        s,
+      );
     }
     expect(s.failures).toBe(0);
-    expect(s.consecutiveChainFailures).toBe(MAX_CHAIN_FAILURES);
     expect(s.shouldPanic).toBe(false);
+    expect(s.heartbeatId).toBe("corrected-19");
+  });
+
+  it("panics when repeated Invalid ID errors have no corrected ID", () => {
+    let s = state;
+    for (let i = 0; i < MAX_HEARTBEAT_FAILURES; i++) {
+      s = handleHeartbeatResponse(
+        { error: "Invalid Heartbeat ID" },
+        s,
+      );
+    }
+    expect(s.failures).toBe(MAX_HEARTBEAT_FAILURES);
+    expect(s.shouldPanic).toBe(true);
     expect(s.heartbeatId).toBe("");
   });
 
-  it("counts Invalid Heartbeat ID as real failure in fallback mode", () => {
-    // Enter fallback mode
-    state.consecutiveChainFailures = MAX_CHAIN_FAILURES;
+  it("recovers from failures when corrected ID finally arrives", () => {
+    state.failures = 5;
+    state.heartbeatId = "";
 
     const result = handleHeartbeatResponse(
-      { error: "Invalid Heartbeat ID" },
+      { error: "Invalid Heartbeat ID", heartbeat_id: "new-chain" },
       state,
     );
-    expect(result.failures).toBe(1);
-    expect(result.lastMessage).toBe("fallback_rejected");
-  });
-
-  it("panics when fallback mode failures reach max", () => {
-    state.consecutiveChainFailures = MAX_CHAIN_FAILURES;
-    state.failures = 4;
-
-    const result = handleHeartbeatResponse(
-      { error: "Invalid Heartbeat ID" },
-      state,
-    );
-    expect(result.failures).toBe(5);
-    expect(result.shouldPanic).toBe(true);
+    expect(result.failures).toBe(0);
+    expect(result.heartbeatId).toBe("new-chain");
+    expect(result.shouldPanic).toBe(false);
   });
 });

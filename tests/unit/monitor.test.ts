@@ -49,12 +49,15 @@ describe("SafetyMonitor", () => {
     });
 
     insertTestMarket(db);
+    // Place order at 0.505 — only 0.5c from midpoint 0.51
+    // With dangerZoneCents=2, redThreshold = 1c (0.01)
+    // Distance 0.005 < 0.01 → RED zone → danger + cancel
     db.insertOrder({
       order_id: "ord1",
       condition_id: "cond1",
       token_id: "tok1",
       side: "BUY",
-      price: 0.49,
+      price: 0.505,
       size: 100,
       order_type: "GTD",
       status: "LIVE",
@@ -71,6 +74,7 @@ describe("SafetyMonitor", () => {
     monitor.start();
 
     // Simulate a book event by emitting directly on the wsManager
+    // midpoint = (0.50 + 0.52) / 2 = 0.51
     wsManager.emit("book", {
       event_type: "book",
       asset_id: "tok1",
@@ -84,7 +88,7 @@ describe("SafetyMonitor", () => {
     // Wait for async cancel to complete
     await new Promise((r) => setTimeout(r, 100));
 
-    // The monitor should detect that ord1 @ 0.49 is within 2c of midpoint 0.51
+    // The monitor should detect that ord1 @ 0.505 is within red zone (< 1c) of midpoint 0.51
     expect(dangerEvents.length).toBe(1);
     expect(dangerEvents[0].orderId).toBe("ord1");
     expect(clobClient.cancelOrder).toHaveBeenCalledWith({ orderID: "ord1" });
