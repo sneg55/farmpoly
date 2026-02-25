@@ -74,6 +74,21 @@ export const runCommand = new Command("run")
       const auth = await deriveOrLoadCreds(env, db);
       console.log(chalk.green(`Authenticated as ${auth.wallet.address}\n`));
 
+      // Clean up stale orders from previous sessions to free locked collateral
+      const staleOrders = db.getLiveOrders();
+      if (staleOrders.length > 0) {
+        console.log(chalk.dim(`Cleaning up ${staleOrders.length} stale orders from previous session...`));
+        try {
+          await auth.clobClient.cancelAll();
+          db.cancelAllOrders();
+          console.log(chalk.dim("Stale orders cancelled."));
+        } catch (err) {
+          console.log(chalk.yellow(`Warning: failed to cancel stale orders: ${(err as Error).message}`));
+          // Mark them cancelled in DB anyway so they don't confuse us
+          db.cancelAllOrders();
+        }
+      }
+
       /**
        * Discover and select markets based on profitability
        */
@@ -314,25 +329,48 @@ export const runCommand = new Command("run")
       console.log(chalk.green("Safety monitor active. Press Ctrl+C to stop.\n"));
 
       // Heartbeat loop (keep orders alive — server timeout is 10s)
+      // NOTE: The SDK's HTTP helpers return errors as { error: "..." } instead of throwing.
+      // We must check response.error BEFORE using response.heartbeat_id.
       let heartbeatFailures = 0;
       let heartbeatId: string | null = null;
       const MAX_HEARTBEAT_FAILURES = 5;
       const HEARTBEAT_INTERVAL_MS = 5000; // 5s for safety margin against 10s server timeout
       const heartbeatInterval = setInterval(async () => {
         try {
-          const response = await auth.clobClient.postHeartbeat(heartbeatId);
-          heartbeatId = response.heartbeat_id ?? null;
-          heartbeatFailures = 0;
-        } catch (err) {
-          const errMsg = (err as Error).message || String(err);
-          // "Invalid Heartbeat ID" means our chain expired — start fresh, don't count as failure
-          if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
-            console.log(chalk.dim("Heartbeat chain expired, starting fresh..."));
-            heartbeatId = null;
-            return;
+          const response = await auth.clobClient.postHeartbeat(heartbeatId) as
+            { heartbeat_id?: string; error?: string };
+
+          // SDK returns errors as values, not exceptions
+          if (response.error) {
+            const errMsg = response.error;
+            if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
+              // Chain expired or invalid — start fresh, don't count as failure
+              console.log(chalk.dim("Heartbeat chain expired, starting fresh..."));
+              heartbeatId = null;
+              return;
+            }
+            // Other API errors
+            heartbeatFailures++;
+            console.log(chalk.yellow(`Heartbeat error (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
+          } else if (response.heartbeat_id) {
+            // Success — store the chained ID
+            heartbeatId = response.heartbeat_id;
+            heartbeatFailures = 0;
+          } else {
+            // Unexpected response shape
+            heartbeatFailures++;
+            console.log(chalk.yellow(`Heartbeat unexpected response (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${JSON.stringify(response)}`));
           }
+
+          if (heartbeatFailures >= MAX_HEARTBEAT_FAILURES) {
+            console.log(chalk.red.bold("Too many heartbeat failures, triggering panic..."));
+            monitor?.emit("panic", new Error("Heartbeat failed repeatedly"));
+          }
+        } catch (err) {
+          // Genuine exceptions (network timeout, etc.)
           heartbeatFailures++;
-          console.log(chalk.yellow(`Heartbeat failed (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
+          const errMsg = (err as Error).message || String(err);
+          console.log(chalk.yellow(`Heartbeat exception (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
           if (heartbeatFailures >= MAX_HEARTBEAT_FAILURES) {
             console.log(chalk.red.bold("Too many heartbeat failures, triggering panic..."));
             monitor?.emit("panic", new Error("Heartbeat failed repeatedly"));

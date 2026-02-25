@@ -55,7 +55,9 @@ export function calculateDailyYield(rewardRate: number, tvl: number): number {
 
 /**
  * Calculate minimum capital required to meet minSize requirements.
- * For BID+ASK, you need enough for both sides at their respective prices.
+ * Since budget is split 50/50 between BID and ASK, each side needs enough
+ * independently. We use 2 × max(bidCost, askCost) so the costlier side
+ * is guaranteed enough after the split.
  */
 export function calculateMinCapitalRequired(
   minSize: number,
@@ -65,13 +67,14 @@ export function calculateMinCapitalRequired(
   const spread = spreadCents / 100;
   const bidPrice = Math.max(midpoint - spread, SAFETY_LOW);
   const askPrice = Math.min(midpoint + spread, SAFETY_HIGH);
-  
+
   // BID: buying YES at bidPrice costs (minSize × bidPrice)
-  // ASK: selling YES at askPrice, but you need NO shares which cost (1 - askPrice)
-  const bidCost = minSize * bidPrice;
-  const askCost = minSize * (1 - askPrice);
-  
-  return bidCost + askCost;
+  // ASK: selling YES at askPrice costs (minSize × (1 - askPrice)) as collateral
+  const bidCostPerSide = minSize * bidPrice;
+  const askCostPerSide = minSize * (1 - askPrice);
+
+  // Each side gets half the allocation, so total must be 2 × max side cost
+  return 2 * Math.max(bidCostPerSide, askCostPerSide);
 }
 
 /**

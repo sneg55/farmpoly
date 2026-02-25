@@ -101,12 +101,25 @@ describe("placeOrdersForMarkets", () => {
     const client = makeMockClobClient();
     const market = makeMarket({ minSize: 5 });
 
+    // Use allocations to limit per-market spend below the 2% safety margin.
+    // Allocation=$90, budget=$200 → effectiveBudget=$196 >> $90 total cost.
+    const allocations = [
+      {
+        market,
+        allocatedUsdc: 90,
+        expectedDailyReward: 2.0,
+        sharePercent: 1.5,
+      },
+    ];
+
     const placed = await placeOrdersForMarkets(
       client as any,
       db,
       [market],
-      100,
+      200,
       5,
+      undefined,
+      allocations,
     );
 
     const bids = placed.filter((o) => o.side === "BUY");

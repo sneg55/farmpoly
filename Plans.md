@@ -1,7 +1,7 @@
 # PolyFarm CLI — Plan
 
 > **Stack**: Node 22, TypeScript, pnpm, better-sqlite3, Commander.js, ethers v5 (via SDK)
-> **Testing**: TDD (vitest, 57 tests) | **Mode**: Solo | **Created**: 2026-02-23
+> **Testing**: TDD (vitest, 90 tests) | **Mode**: Solo | **Created**: 2026-02-23
 
 ## Status: MVP Complete
 
@@ -58,79 +58,33 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 
 ---
 
-## Phase 7: Production Bug Fixes (GitHub Issue #1) `[bugfix:reproduce-first]`
+## Phase 7: Production Bug Fixes (GitHub Issue #1) — DONE
 
-> **Ref**: [GitHub Issue #1 — Production deployment failures](https://github.com/sneg55/farmpoly/issues/1)
-> **Environment**: Helsinki (ARM64), $103.76 USDC, `--budget 100 --spread 5 --max-markets 10`
+> **Ref**: [GitHub Issue #1](https://github.com/sneg55/farmpoly/issues/1)
 
-### 7.1 Fix SQLite FK constraint on order insert — [x] DONE
+- [x] 7.1 Fix SQLite FK constraint (upsert markets before order insert)
+- [x] 7.2 Fix heartbeat chaining (reset on invalid ID, 8s→5s interval)
+- [x] 7.3 Fix balance errors (cumulative capital tracking, detailed error logging)
+- [x] 7.4 Add order placement tests (6 tests in placer.test.ts)
 
-**Bug**: `placer.ts:insertOrder()` fails with `FOREIGN KEY constraint failed` because markets are never upserted into the `markets` table during `run` command. Only `discover` command calls `db.upsertMarket()`.
+## Phase 8: Production Bug Fixes Round 2 (GitHub Issue #2) — DONE
 
-**Root cause**: `run.ts` calls `discoverAndAllocate()` → `filterRewardMarkets()` which returns `RewardMarket[]` objects, then passes them to `placeOrdersForMarkets()` which calls `db.insertOrder()` with `condition_id` referencing `markets(condition_id)` FK — but the market row doesn't exist yet.
+> **Ref**: [GitHub Issue #2](https://github.com/sneg55/farmpoly/issues/2)
 
-**Fix**:
-1. In `placeOrdersForMarkets()` (or `run.ts` before calling it), upsert each `RewardMarket` into the `markets` table before inserting orders
-2. Add a helper `db.upsertFromRewardMarket(market: RewardMarket)` to avoid duplicating the field mapping
-3. Add test: placing an order for a market not in DB should not crash (upsert first)
-
-**Files**: `src/orders/placer.ts`, `src/db/database.ts`, `src/cli/commands/run.ts`
-
-### 7.2 Fix heartbeat chaining — [x] DONE
-
-**Bug**: `postHeartbeat(null)` starts a new heartbeat chain, server returns `heartbeat_id`. Subsequent calls with that ID fail with `"Invalid Heartbeat ID"`. Logs show the returned ID is immediately rejected on the next call.
-
-**Root cause**: The SDK's `postHeartbeat()` may return the response inside a wrapper (e.g., `response.data.heartbeat_id` vs `response.heartbeat_id`), or the server rejects stale IDs when >10s have elapsed between heartbeats (our 8s interval may be too close to the 10s server timeout, causing race conditions under network latency).
-
-**Fix**:
-1. Log the full heartbeat response object to diagnose the actual shape
-2. On `"Invalid Heartbeat ID"` error, reset `heartbeatId = null` and start a fresh chain (don't count as failure)
-3. Reduce heartbeat interval from 8s to 5s for more margin against the 10s server timeout
-4. Add retry with fresh chain on 400 errors before counting as failure
-
-**Files**: `src/cli/commands/run.ts`
-
-### 7.3 Fix "not enough balance / allowance" errors — [x] DONE
-
-**Bug**: Orders fail with balance/allowance error despite $103 USDC and verified approvals.
-
-**Root cause (likely)**: The `createOrder` SDK call computes order signing based on `price × size` but Polymarket may require balance for the full notional. With smart allocation splitting $100 across 10 markets, some order sizes may exceed what the remaining unallocated balance can cover (previous orders already lock up balance). Also, ASK (SELL YES) orders may require holding YES tokens or posting collateral that we don't have.
-
-**Fix**:
-1. Add error handling around individual order placement that logs the exact `price`, `size`, `side`, and `tokenId` when balance errors occur
-2. For ASK/SELL orders: verify we understand the collateral model — selling YES tokens we don't own requires posting USDC collateral equal to `(1 - price) × size`
-3. Fix budget calculation: BID costs `price × size` USDC, ASK costs `(1 - price) × size` USDC. Current `sharesToBuy(perSideUsdc, 1 - askPrice)` may be wrong — it computes how many shares you can buy at `1 - askPrice`, but for a SELL the cost model is different
-4. Track cumulative committed capital across all markets to avoid over-committing
-
-**Files**: `src/orders/placer.ts`, `src/orders/calculator.ts`
-
-### 7.4 Add integration test for order placement flow — [x] DONE
-
-**Test**: Unit test that verifies the full flow: `discoverAndAllocate()` → `upsertMarket()` → `placeOrdersForMarkets()` → orders exist in DB with correct FK relationships.
-
-**Files**: `tests/unit/placer.test.ts`
-
----
-
-## Priority Matrix
-
-| Priority | Task | Impact |
-|----------|------|--------|
-| **Required** | 7.1 FK constraint fix | 0 orders placed — total blocker |
-| **Required** | 7.3 Balance/allowance fix | Orders rejected even with sufficient USDC |
-| **Required** | 7.2 Heartbeat fix | Cascading failures → panic shutdown |
-| **Recommended** | 7.4 Integration test | Prevent regression |
-
----
+- [x] 8.1 Fix heartbeat: SDK returns errors as values, not exceptions — check `response.error` first
+- [x] 8.2 Fix min-size: `calculateMinCapitalRequired` → `2 × max(bidCost, askCost)` for 50/50 split
+- [x] 8.3 Fix balance: cancel stale orders at startup + 2% safety margin on budget
+- [x] 8.4 Add heartbeat tests (11 tests in heartbeat.test.ts)
 
 ## Known Issues
 
 | Issue | Status | Detail |
 |-------|--------|--------|
-| Polymarket geoblock (SG) | Resolved | Moved to Helsinki VPS (Finland, non-restricted) |
-| SQLite FK constraint | Phase 7.1 | Markets not upserted before order insert |
-| Balance/allowance error | Phase 7.3 | Budget/collateral calculation needs fix |
-| Heartbeat chaining | Phase 7.2 | Invalid heartbeat ID on subsequent calls |
+| Polymarket geoblock (SG) | Resolved | Moved to Helsinki VPS |
+| SQLite FK constraint | Fixed (7.1) | Markets upserted before order insert |
+| Heartbeat SDK quirk | Fixed (8.1) | SDK returns `{ error }` instead of throwing |
+| Min size constraints | Fixed (8.2) | `2 × max(bidCost, askCost)` formula |
+| Balance/allowance | Fixed (8.3) | Stale order cleanup + 2% margin |
 
 ## Deployment
 
