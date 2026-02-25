@@ -152,8 +152,15 @@ export async function executeHedge(
   // Price cap: complement + max hedge cost
   const priceCap = Math.min(complementPrice + options.maxHedgeCostCents / 100, 0.99);
 
-  // Round hedge size to 2 decimal places (CLOB requires max 2 decimals for taker amount)
-  const hedgeSize = Math.floor(fill.filledSize * 100) / 100;
+  // Round price to tick size precision (CLOB rejects excess decimals)
+  const tickDecimals = fill.tickSize === "0.1" ? 1 : fill.tickSize === "0.001" ? 3 : fill.tickSize === "0.0001" ? 4 : 2;
+  const priceRounded = Math.floor(priceCap * Math.pow(10, tickDecimals)) / Math.pow(10, tickDecimals);
+
+  // Round hedge size so that size × price produces at most 2 decimal places in USDC.
+  // CLOB requires: makerAmount (= price × size in USDC) has max 2 decimals,
+  //                takerAmount (= size in tokens) has max 4 decimals.
+  // Safest: round size down to whole number to guarantee clean USDC amounts.
+  const hedgeSize = Math.floor(fill.filledSize);
 
   if (hedgeSize <= 0) {
     return {
@@ -170,10 +177,6 @@ export async function executeHedge(
   // Try to buy the opposite token
   let hedgeOrderId: string | null = null;
   let hedgePrice: number | null = null;
-
-  // Round price to tick size precision (CLOB rejects excess decimals)
-  const tickDecimals = fill.tickSize === "0.1" ? 1 : fill.tickSize === "0.001" ? 3 : fill.tickSize === "0.0001" ? 4 : 2;
-  const priceRounded = Math.floor(priceCap * Math.pow(10, tickDecimals)) / Math.pow(10, tickDecimals);
 
   const orderParams = {
     tokenID: hedgeTokenId,
