@@ -14,8 +14,17 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            echo "=== Container status ==="
-            docker ps --filter name=polyfarm --format "{{.Status}} ({{.RunningFor}})"
+            echo "=== ALL running containers ==="
+            docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}"
             echo ""
-            echo "=== Last 200 lines ==="
-            docker logs polyfarm --tail 200 2>&1
+            echo "=== polyfarm logs (last 200) ==="
+            docker logs polyfarm --tail 200 2>&1 || echo "No polyfarm container"
+            echo ""
+            echo "=== Any dashboard containers? ==="
+            docker ps -a --filter name=dashboard --format "{{.Names}} {{.Status}}" || true
+            echo ""
+            echo "=== Listening on port 3737? ==="
+            ss -tlnp | grep 3737 || echo "Nothing on 3737"
+            echo ""
+            echo "=== DB file ==="
+            ls -la /opt/farmpoly-data/*.db* 2>/dev/null || echo "No DB files found"
