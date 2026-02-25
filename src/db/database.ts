@@ -128,7 +128,7 @@ export class PolyfarmDb {
         "UPDATE orders SET filled_size = filled_size + ?, status = CASE WHEN filled_size + ? >= size THEN 'FILLED' ELSE status END WHERE order_id = ?",
       ),
       insertHedge: db.prepare(
-        `INSERT INTO hedges (trade_id, order_id, condition_id, fill_side, fill_size, fill_price, status)
+        `INSERT OR IGNORE INTO hedges (trade_id, order_id, condition_id, fill_side, fill_size, fill_price, status)
          VALUES (@trade_id, @order_id, @condition_id, @fill_side, @fill_size, @fill_price, @status)`,
       ),
       updateHedge: db.prepare(
@@ -234,7 +234,7 @@ export class PolyfarmDb {
     fill_side: "BUY" | "SELL";
     fill_size: number;
     fill_price: number;
-    status: string;
+    status: HedgeRow["status"];
   }): number {
     const result = this.stmts.insertHedge.run(hedge);
     return Number(result.lastInsertRowid);
@@ -248,7 +248,7 @@ export class PolyfarmDb {
     merge_amount: number;
     merge_tx_hash: string | null;
     pnl_cents: number;
-    status: string;
+    status: HedgeRow["status"];
   }): void {
     this.stmts.updateHedge.run(hedge);
   }

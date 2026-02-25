@@ -39,7 +39,7 @@ export function calculateStabilityScore(market: GammaMarket): number {
  * @param market - Market to check
  * @param maxVolatilityCents - Maximum 24h price change in cents (default 5)
  */
-export function isToVolatile(
+export function isTooVolatile(
   market: GammaMarket,
   maxVolatilityCents: number = 5,
 ): boolean {

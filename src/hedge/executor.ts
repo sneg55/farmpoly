@@ -3,7 +3,6 @@ import { Side, OrderType } from "@polymarket/clob-client";
 import type { Wallet } from "ethers";
 import { ethers } from "ethers";
 import type { EnvConfig } from "../utils/config.js";
-import type { PolyfarmDb } from "../db/database.js";
 import type { FillEvent } from "./detector.js";
 import { getTokenBalances } from "../positions/fetcher.js";
 import { mergePositions } from "./merger.js";
@@ -22,6 +21,7 @@ export interface HedgeResult {
   mergeAmount: number;
   mergeTxHash: string | null;
   pnlCents: number;
+  error?: string;
 }
 
 /**
@@ -39,7 +39,6 @@ export async function executeHedge(
   clobClient: ClobClient,
   wallet: Wallet,
   env: EnvConfig,
-  db: PolyfarmDb,
   fill: FillEvent,
   options: HedgeOptions = { maxHedgeCostCents: 5 },
 ): Promise<HedgeResult> {
@@ -91,8 +90,9 @@ export async function executeHedge(
       hedgeOrderId = response.orderID || response.id;
       hedgePrice = priceCap;
     }
-  } catch {
-    // FOK failed, try FAK
+  } catch (fokErr) {
+    // FOK failed (no liquidity for full fill), try FAK below
+    console.log(`  FOK hedge failed: ${(fokErr as Error).message?.slice(0, 80)}`);
   }
 
   if (!hedgeOrderId) {
@@ -103,8 +103,8 @@ export async function executeHedge(
         hedgeOrderId = response.orderID || response.id;
         hedgePrice = priceCap;
       }
-    } catch {
-      // Both failed
+    } catch (fakErr) {
+      const errMsg = (fakErr as Error).message || String(fakErr);
       return {
         status: "HEDGE_FAILED",
         hedgeOrderId: null,
@@ -113,6 +113,7 @@ export async function executeHedge(
         mergeAmount: 0,
         mergeTxHash: null,
         pnlCents: 0,
+        error: `FOK+FAK failed: ${errMsg.slice(0, 120)}`,
       };
     }
   }
@@ -126,6 +127,7 @@ export async function executeHedge(
       mergeAmount: 0,
       mergeTxHash: null,
       pnlCents: 0,
+      error: "No order ID returned from FOK or FAK",
     };
   }
 
@@ -168,7 +170,7 @@ export async function executeHedge(
       fill.negRisk,
       mergeAmount,
     );
-  } catch {
+  } catch (mergeErr) {
     const mergeAmountNum = Number(ethers.utils.formatUnits(mergeAmount, 6));
     return {
       status: "MERGE_FAILED",
@@ -178,6 +180,7 @@ export async function executeHedge(
       mergeAmount: mergeAmountNum,
       mergeTxHash: null,
       pnlCents: calculatePnlCents(fill.filledPrice, hedgePrice ?? 0),
+      error: `Merge failed: ${(mergeErr as Error).message?.slice(0, 120)}`,
     };
   }
 

@@ -1,5 +1,5 @@
 import type { GammaMarket } from "./gamma.js";
-import { calculateStabilityScore, isToVolatile } from "../intelligence/stability.js";
+import { calculateStabilityScore, isTooVolatile } from "../intelligence/stability.js";
 
 export interface RewardMarket {
   conditionId: string;
@@ -146,7 +146,7 @@ export function filterRewardMarkets(
     if (!isWithinSafetyBounds(midpoint)) continue;
 
     // Volatility filter: skip markets with excessive 24h price change
-    if (isToVolatile(market, maxVolatilityCents)) continue;
+    if (isTooVolatile(market, maxVolatilityCents)) continue;
 
     // Calculate stability score
     const stabilityScore = calculateStabilityScore(market);

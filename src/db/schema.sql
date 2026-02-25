@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS config (
 
 CREATE TABLE IF NOT EXISTS hedges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  trade_id TEXT NOT NULL,
+  trade_id TEXT NOT NULL UNIQUE,
   order_id TEXT NOT NULL,
   condition_id TEXT NOT NULL REFERENCES markets(condition_id),
   fill_side TEXT NOT NULL CHECK(fill_side IN ('BUY', 'SELL')),
@@ -70,3 +70,4 @@ CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_recent ON orders(status, cancelled_at DESC, placed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hedges_status ON hedges(status);
+CREATE INDEX IF NOT EXISTS idx_hedges_created_at ON hedges(created_at DESC);

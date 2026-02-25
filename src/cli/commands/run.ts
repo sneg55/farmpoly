@@ -63,6 +63,7 @@ export const runCommand = new Command("run")
     let fillDetector: FillDetector | null = null;
     let rebalanceInterval: NodeJS.Timeout | null = null;
     let currentMarkets: RewardMarket[] = [];
+    let sessionId: number | null = null;
 
     try {
       const env = loadEnv();
@@ -155,7 +156,7 @@ export const runCommand = new Command("run")
         console.log(chalk.red.bold(`\nPANIC: ${err.message}`));
         console.log("Cancelling all orders...");
         try {
-          await panicCancelAll(auth.clobClient, db, sessionId);
+          await panicCancelAll(auth.clobClient, db, sessionId ?? undefined);
           console.log(chalk.green("All orders cancelled via API"));
         } catch (cancelErr) {
           console.error(chalk.red("Failed to cancel orders!"), cancelErr);
@@ -399,7 +400,7 @@ export const runCommand = new Command("run")
       currentMarkets = targetMarkets;
 
       // Start session
-      const sessionId = db.startSession(budget, spreadCents);
+      sessionId = db.startSession(budget, spreadCents);
       db.updateSessionStats(sessionId, { markets_count: targetMarkets.length });
 
       // Subscribe monitor to all market tokens
@@ -427,8 +428,21 @@ export const runCommand = new Command("run")
       // ───────────────────────────────────────────────────
       if (hedgeFills) {
         fillDetector = new FillDetector(auth.clobClient, db);
+        const hedgingTrades = new Set<string>(); // single-flight per trade
 
         fillDetector.on("fill", async (fill: FillEvent) => {
+          // Single-flight guard: skip if already processing this trade
+          if (hedgingTrades.has(fill.tradeId)) return;
+          hedgingTrades.add(fill.tradeId);
+
+          // Validate fill data
+          if (!isFinite(fill.filledSize) || fill.filledSize <= 0 ||
+              !isFinite(fill.filledPrice) || fill.filledPrice <= 0 || fill.filledPrice >= 1) {
+            console.log(chalk.yellow(`  Skipping invalid fill data: size=${fill.filledSize} price=${fill.filledPrice}`));
+            hedgingTrades.delete(fill.tradeId);
+            return;
+          }
+
           console.log(
             chalk.yellow.bold(
               `\nFILL DETECTED: ${fill.side} ${fill.filledSize.toFixed(2)} @ ${fill.filledPrice.toFixed(2)} ` +
@@ -436,20 +450,21 @@ export const runCommand = new Command("run")
             ),
           );
 
+          try {
           // 1. Update order fill in DB
           db.updateOrderFill(fill.orderId, fill.filledSize);
-          db.incrementFilled(sessionId);
+          if (sessionId !== null) db.incrementFilled(sessionId);
 
           // 2. Cancel counterpart orders to prevent double exposure
           if (monitor) {
             const cancelled = await monitor.cancelCounterpartOrders(fill.conditionId, fill.side);
             if (cancelled.length > 0) {
               console.log(chalk.dim(`  Cancelled ${cancelled.length} counterpart order(s)`));
-              db.incrementCancelled(sessionId, cancelled.length);
+              if (sessionId !== null) db.incrementCancelled(sessionId, cancelled.length);
             }
           }
 
-          // 3. Insert pending hedge record
+          // 3. Insert pending hedge record (UNIQUE on trade_id — returns 0 for duplicates)
           const hedgeId = db.insertHedge({
             trade_id: fill.tradeId,
             order_id: fill.orderId,
@@ -460,54 +475,49 @@ export const runCommand = new Command("run")
             status: "PENDING",
           });
 
+          if (hedgeId === 0) {
+            console.log(chalk.dim(`  Duplicate fill (trade ${fill.tradeId.slice(0, 8)}), skipping hedge`));
+            return;
+          }
+
           // 4. Execute hedge (buy opposite + merge)
-          try {
-            const result = await executeHedge(
-              auth.clobClient,
-              auth.wallet,
-              env,
-              db,
-              fill,
-              { maxHedgeCostCents: maxHedgeCostCents },
+          const result = await executeHedge(
+            auth.clobClient,
+            auth.wallet,
+            env,
+            fill,
+            { maxHedgeCostCents: maxHedgeCostCents },
+          );
+
+          // 5. Update hedge record
+          db.updateHedge({
+            id: hedgeId,
+            hedge_order_id: result.hedgeOrderId,
+            hedge_price: result.hedgePrice,
+            hedge_size: result.hedgeSize,
+            merge_amount: result.mergeAmount,
+            merge_tx_hash: result.mergeTxHash,
+            pnl_cents: result.pnlCents,
+            status: result.status,
+          });
+
+          // 6. Log result with color coding
+          if (result.status === "HEDGED") {
+            const pnlColor = result.pnlCents >= 0 ? chalk.green : chalk.red;
+            console.log(
+              chalk.green(`  HEDGED: `) +
+              `bought opposite @ ${result.hedgePrice?.toFixed(2) ?? "?"} ` +
+              `merged: ${result.mergeAmount.toFixed(2)} ` +
+              pnlColor(`P&L: ${result.pnlCents >= 0 ? "+" : ""}${result.pnlCents.toFixed(1)}c`) +
+              (result.mergeTxHash ? chalk.dim(` [tx: ${result.mergeTxHash.slice(0, 10)}...]`) : ""),
             );
-
-            // 5. Update hedge record
-            db.updateHedge({
-              id: hedgeId,
-              hedge_order_id: result.hedgeOrderId,
-              hedge_price: result.hedgePrice,
-              hedge_size: result.hedgeSize,
-              merge_amount: result.mergeAmount,
-              merge_tx_hash: result.mergeTxHash,
-              pnl_cents: result.pnlCents,
-              status: result.status,
-            });
-
-            // 6. Log result with color coding
-            if (result.status === "HEDGED") {
-              const pnlColor = result.pnlCents >= 0 ? chalk.green : chalk.red;
-              console.log(
-                chalk.green(`  HEDGED: `) +
-                `bought opposite @ ${result.hedgePrice?.toFixed(2) ?? "?"} ` +
-                `merged: ${result.mergeAmount.toFixed(2)} ` +
-                pnlColor(`P&L: ${result.pnlCents >= 0 ? "+" : ""}${result.pnlCents.toFixed(1)}c`) +
-                (result.mergeTxHash ? chalk.dim(` [tx: ${result.mergeTxHash.slice(0, 10)}...]`) : ""),
-              );
-            } else {
-              console.log(chalk.red(`  Hedge ${result.status}: fill exposure remains`));
-            }
+          } else {
+            console.log(chalk.red(`  Hedge ${result.status}: fill exposure remains`));
+          }
           } catch (err) {
             console.error(chalk.red(`  Hedge error: ${(err as Error).message}`));
-            db.updateHedge({
-              id: hedgeId,
-              hedge_order_id: null,
-              hedge_price: null,
-              hedge_size: 0,
-              merge_amount: 0,
-              merge_tx_hash: null,
-              pnl_cents: 0,
-              status: "HEDGE_FAILED",
-            });
+          } finally {
+            hedgingTrades.delete(fill.tradeId);
           }
         });
 
@@ -531,11 +541,14 @@ export const runCommand = new Command("run")
       let consecutiveChainFailures = 0;
       let heartbeatLoggedFirstSuccess = false;
       let lastHeartbeatLogTime = 0;
+      let heartbeatInFlight = false;
       const MAX_HEARTBEAT_FAILURES = 5;
       const MAX_CHAIN_FAILURES = 3;
       const HEARTBEAT_INTERVAL_MS = 5000;
       const HEARTBEAT_LOG_INTERVAL_MS = 60_000;
       const heartbeatInterval = setInterval(async () => {
+        if (heartbeatInFlight) return; // skip if previous heartbeat still in-flight
+        heartbeatInFlight = true;
         try {
           const sendId = consecutiveChainFailures >= MAX_CHAIN_FAILURES ? "" : heartbeatId;
           const response = await auth.clobClient.postHeartbeat(sendId) as
@@ -593,6 +606,8 @@ export const runCommand = new Command("run")
             console.log(chalk.red.bold("Too many heartbeat failures, triggering panic..."));
             monitor?.emit("panic", new Error("Heartbeat failed repeatedly"));
           }
+        } finally {
+          heartbeatInFlight = false;
         }
       }, HEARTBEAT_INTERVAL_MS);
 
@@ -601,13 +616,18 @@ export const runCommand = new Command("run")
       // ───────────────────────────────────────────────────
       if (rebalanceIntervalMin > 0) {
         const REBALANCE_INTERVAL_MS = rebalanceIntervalMin * 60 * 1000;
+        let rebalancing = false;
         console.log(chalk.dim(`Next rebalance check in ${rebalanceIntervalMin} minutes`));
 
         rebalanceInterval = setInterval(async () => {
+          if (rebalancing) return; // skip if previous rebalance still running
+          rebalancing = true;
           try {
             await performRebalance();
           } catch (err) {
             console.error(chalk.red("Rebalance error:"), (err as Error).message);
+          } finally {
+            rebalancing = false;
           }
         }, REBALANCE_INTERVAL_MS);
       }
@@ -624,7 +644,12 @@ export const runCommand = new Command("run")
 
         console.log("Cancelling all live orders...");
         try {
-          await gracefulShutdown(auth.clobClient, db, sessionId);
+          if (sessionId !== null) {
+            await gracefulShutdown(auth.clobClient, db, sessionId);
+          } else {
+            await auth.clobClient.cancelAll();
+            db.cancelAllOrders();
+          }
           console.log(chalk.green("All orders cancelled."));
         } catch (err) {
           console.error(chalk.red("Warning: Failed to cancel some orders"), err);
