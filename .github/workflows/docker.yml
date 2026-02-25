@@ -60,3 +60,46 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to Hetzner
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Login to GHCR
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Pull latest image
+            docker pull ghcr.io/${{ github.repository }}:latest
+            
+            # Stop and remove old container
+            docker stop polyfarm || true
+            docker rm polyfarm || true
+            
+            # Create .env file
+            cat > /opt/farmpoly/.env << 'EOF'
+            POLYGON_PRIVATE_KEY=${{ secrets.POLYGON_PRIVATE_KEY }}
+            POLYGON_RPC_URL=${{ secrets.POLYGON_RPC_URL }}
+            CLOB_API_URL=https://clob.polymarket.com
+            GAMMA_API_URL=https://gamma-api.polymarket.com
+            EOF
+            
+            # Start new container
+            docker run -d \
+              --name polyfarm \
+              --restart unless-stopped \
+              -v /opt/farmpoly-data:/data \
+              --env-file /opt/farmpoly/.env \
+              ghcr.io/${{ github.repository }}:latest \
+              run --budget 100 --spread 5 --max-markets 10 --rebalance-interval 60 --min-daily-yield 1
+            
+            # Show logs
+            docker logs polyfarm --tail 50
