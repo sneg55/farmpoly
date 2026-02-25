@@ -88,9 +88,10 @@ export async function placeOrdersForMarkets(
   const { perSideUsdc: defaultPerSide } = allocateBudget(totalBudgetUsdc, markets.length);
   
   const placedOrders: PlacedOrder[] = [];
-  // Track cumulative committed capital to avoid over-committing beyond total budget
-  // Use 98% of budget as ceiling to account for rounding/fee edge cases
-  const effectiveBudget = totalBudgetUsdc * 0.98;
+  // Track cumulative committed capital to avoid over-committing beyond total budget.
+  // Use a small absolute epsilon to absorb floating-point rounding only.
+  // Previous 2% margin was too aggressive — blocked valid ASK orders in single-market case.
+  const effectiveBudget = totalBudgetUsdc + 0.01;
   let committedUsdc = 0;
   const expiration = getEndOfDayUtc();
 
@@ -138,7 +139,7 @@ export async function placeOrdersForMarkets(
       );
     } else if (committedUsdc + bidCost > effectiveBudget) {
       console.log(
-        `  Skip BID: would exceed budget ($${committedUsdc.toFixed(2)} + $${bidCost.toFixed(2)} > $${totalBudgetUsdc})`,
+        `  Skip BID: would exceed budget ($${committedUsdc.toFixed(2)} + $${bidCost.toFixed(2)} = $${(committedUsdc + bidCost).toFixed(2)} > $${totalBudgetUsdc})`,
       );
     } else {
       try {
@@ -195,7 +196,7 @@ export async function placeOrdersForMarkets(
       );
     } else if (committedUsdc + askCost > effectiveBudget) {
       console.log(
-        `  Skip ASK: would exceed budget ($${committedUsdc.toFixed(2)} + $${askCost.toFixed(2)} > $${totalBudgetUsdc})`,
+        `  Skip ASK: would exceed budget ($${committedUsdc.toFixed(2)} + $${askCost.toFixed(2)} = $${(committedUsdc + askCost).toFixed(2)} > $${totalBudgetUsdc})`,
       );
     } else {
       try {

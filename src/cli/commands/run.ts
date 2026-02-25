@@ -332,18 +332,20 @@ export const runCommand = new Command("run")
       // NOTE: The SDK's HTTP helpers return errors as { error: "..." } instead of throwing.
       // We must check response.error BEFORE using response.heartbeat_id.
       let heartbeatFailures = 0;
-      let heartbeatId: string | null = null;
+      // API expects "" (empty string) for first heartbeat, NOT null.
+      // SDK does `heartbeatId ?? null` — empty string passes through correctly.
+      let heartbeatId: string = "";
       let consecutiveChainFailures = 0;
       let heartbeatLoggedFirstSuccess = false;
       let lastHeartbeatLogTime = 0;
       const MAX_HEARTBEAT_FAILURES = 5;
-      const MAX_CHAIN_FAILURES = 3; // After 3 chain failures, stop chaining (always send null)
+      const MAX_CHAIN_FAILURES = 3; // After 3 chain failures, restart with empty string
       const HEARTBEAT_INTERVAL_MS = 5000; // 5s for safety margin against 10s server timeout
       const HEARTBEAT_LOG_INTERVAL_MS = 60_000; // Log status once per minute
       const heartbeatInterval = setInterval(async () => {
         try {
-          // If chaining has failed repeatedly, fall back to always sending null
-          const sendId = consecutiveChainFailures >= MAX_CHAIN_FAILURES ? null : heartbeatId;
+          // If chaining has failed repeatedly, fall back to always starting fresh
+          const sendId = consecutiveChainFailures >= MAX_CHAIN_FAILURES ? "" : heartbeatId;
           const response = await auth.clobClient.postHeartbeat(sendId) as
             { heartbeat_id?: string; error?: string };
 
@@ -351,11 +353,19 @@ export const runCommand = new Command("run")
           if (response.error) {
             const errMsg = response.error;
             if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
-              // Chain expired or invalid — start fresh, don't count as failure
-              consecutiveChainFailures++;
-              heartbeatId = null;
-              if (consecutiveChainFailures === MAX_CHAIN_FAILURES) {
-                console.log(chalk.dim("Heartbeat chaining disabled after repeated failures (using null fallback)"));
+              if (consecutiveChainFailures >= MAX_CHAIN_FAILURES) {
+                // Already in fallback mode and even "" is rejected — this is a real failure
+                heartbeatFailures++;
+                if (heartbeatFailures === 1) {
+                  console.log(chalk.yellow("Heartbeat: fresh start also rejected — API may require auth refresh"));
+                }
+              } else {
+                // Chain expired or invalid — start fresh with empty string
+                consecutiveChainFailures++;
+                heartbeatId = "";
+                if (consecutiveChainFailures === MAX_CHAIN_FAILURES) {
+                  console.log(chalk.dim("Heartbeat chaining disabled after repeated failures (restarting each time)"));
+                }
               }
               return;
             }

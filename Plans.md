@@ -110,6 +110,45 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 
 **Files**: `tests/unit/approval.test.ts`
 
+## Phase 10: Production Bug Fixes Round 4 (GitHub Issue #4) — DONE
+
+> **Ref**: [GitHub Issue #4](https://github.com/sneg55/farmpoly/issues/4)
+
+### 10.1 Fix budget off-by-one: ASK order incorrectly blocked — cc:DONE
+
+**Bug**: With $100 budget and 1 market, BID ($50) placed OK but ASK skipped with "would exceed budget ($50.00 + $50.00 > $100)". The math `$50 + $50 = $100` should pass, but the 2% safety margin (`effectiveBudget = totalBudgetUsdc * 0.98 = $98`) causes `$50 + $50 = $100 > $98` to reject the ASK.
+
+**Root cause**: `placer.ts:93` applies `effectiveBudget = totalBudgetUsdc * 0.98` as a hard ceiling. When smart allocation gives a market exactly the full budget (e.g. single-market case), the 2% margin steals $2 from a perfectly valid $100 plan. The safety margin was added in Phase 8.3 for multi-market rounding edge cases but is too aggressive for single-market deployments.
+
+**Fix**: Change the budget guard from a 2% blanket reduction to a small absolute epsilon (e.g. `$0.01`). The cumulative tracker already prevents over-commitment — the margin only needs to absorb floating-point rounding, not reserve 2% of capital.
+
+**Files**: `src/orders/placer.ts`
+**Test**: Update `tests/unit/placer.test.ts` — add test that BID+ASK both place when they exactly equal the budget.
+
+### 10.2 Fix heartbeat null→empty string + fallback escalation — cc:DONE
+
+**Bug**: After 3 chain failures, code sends `null` as heartbeat ID. But `postHeartbeat(null)` also returns `{ error: "Invalid Heartbeat ID" }`, which re-enters the chain-failure branch and logs the SDK's own `[CLOB Client] request error` on every 5s tick forever.
+
+**Root cause**: When `consecutiveChainFailures >= MAX_CHAIN_FAILURES`, the code sends `null` but still processes the response through the same error-checking path. The SDK's internal logging (`[CLOB Client] request error`) cannot be suppressed from our side.
+
+**Fix**:
+1. When in null-fallback mode, treat "Invalid Heartbeat ID" responses as expected (don't increment `consecutiveChainFailures` further, don't log)
+2. The real fix: `postHeartbeat(null)` should start a **new** chain — if even that fails, it means the API key or auth is invalid. Count those as real failures toward panic threshold.
+3. Alternative: if null heartbeat consistently fails, stop the heartbeat interval entirely and log a single warning.
+
+**Files**: `src/cli/commands/run.ts`
+**Test**: Add test cases to `tests/unit/heartbeat.test.ts` for null-fallback mode behavior.
+
+### 10.3 Improve budget skip log message accuracy — cc:DONE
+
+**Bug**: Log says "would exceed budget ($50.00 + $50.00 > $100)" — the comparison is against `effectiveBudget` ($98) but the log message shows `totalBudgetUsdc` ($100), which is misleading. Users see `$50 + $50 > $100` and think it's wrong math.
+
+**Fix**: Log the actual effective budget being compared against, or remove the distinction since 10.1 eliminates the 2% margin.
+
+**Files**: `src/orders/placer.ts`
+
+---
+
 ## Known Issues
 
 | Issue | Status | Detail |
@@ -119,8 +158,10 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 | Heartbeat SDK quirk | Fixed (8.1) | SDK returns `{ error }` instead of throwing |
 | Min size constraints | Fixed (8.2) | `2 × max(bidCost, askCost)` formula |
 | Balance/allowance | Fixed (8.3) | Stale order cleanup + 2% margin |
-| ASK orders fail | Fixed (9.1) | ERC1155 ConditionalToken approvals added |
+| ASK orders fail (ERC1155) | Fixed (9.1) | ERC1155 ConditionalToken approvals added |
 | Heartbeat loop | Fixed (9.2) | Debug logging + null-only fallback after 3 chain failures |
+| ASK blocked by budget | Fixed (10.1) | Replaced 2% margin with +$0.01 epsilon |
+| Heartbeat null spam | Fixed (10.2) | Use "" not null; fallback escalates to real failures |
 
 ## Deployment
 

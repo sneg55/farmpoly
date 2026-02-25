@@ -101,8 +101,6 @@ describe("placeOrdersForMarkets", () => {
     const client = makeMockClobClient();
     const market = makeMarket({ minSize: 5 });
 
-    // Use allocations to limit per-market spend below the 2% safety margin.
-    // Allocation=$90, budget=$200 → effectiveBudget=$196 >> $90 total cost.
     const allocations = [
       {
         market,
@@ -130,6 +128,47 @@ describe("placeOrdersForMarkets", () => {
     // BID should be below midpoint, ASK above
     expect(bids[0].price).toBeLessThan(0.50);
     expect(asks[0].price).toBeGreaterThan(0.50);
+  });
+
+  it("places both BID and ASK when cost exactly equals budget (no off-by-one)", async () => {
+    const client = makeMockClobClient();
+    const market = makeMarket({ minSize: 5 });
+
+    // Single market with allocation = full budget → BID+ASK costs should equal budget exactly
+    const allocations = [
+      {
+        market,
+        allocatedUsdc: 100,
+        expectedDailyReward: 2.0,
+        sharePercent: 1.5,
+      },
+    ];
+
+    const placed = await placeOrdersForMarkets(
+      client as any,
+      db,
+      [market],
+      100,
+      5,
+      undefined,
+      allocations,
+    );
+
+    const bids = placed.filter((o) => o.side === "BUY");
+    const asks = placed.filter((o) => o.side === "SELL");
+    expect(bids.length).toBe(1);
+    expect(asks.length).toBe(1);
+
+    // Total cost should be close to but not exceed budget
+    let totalCost = 0;
+    for (const order of placed) {
+      if (order.side === "BUY") {
+        totalCost += order.price * order.size;
+      } else {
+        totalCost += (1 - order.price) * order.size;
+      }
+    }
+    expect(totalCost).toBeLessThanOrEqual(100.01);
   });
 
   it("skips orders below minimum size", async () => {
