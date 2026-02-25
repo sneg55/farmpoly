@@ -63,7 +63,10 @@ export async function getOpenPositions(clobClient: ClobClient): Promise<OpenOrde
 
 /**
  * Fetch on-chain ERC1155 token balances using balanceOfBatch for efficiency.
+ * Batches into chunks of BATCH_SIZE to avoid RPC calldata limits.
  */
+const BATCH_SIZE = 100;
+
 export async function getTokenBalances(
   wallet: Wallet,
   env: EnvConfig,
@@ -74,14 +77,87 @@ export async function getTokenBalances(
   const provider = new ethers.providers.JsonRpcProvider(env.polygonRpcUrl);
   const ct = new Contract(CONDITIONAL_TOKENS, ERC1155_BALANCE_ABI, provider);
 
-  // balanceOfBatch expects parallel arrays of addresses and IDs
-  const addresses = tokenIds.map(() => wallet.address);
-  const balances: BigNumber[] = await ct.balanceOfBatch(addresses, tokenIds);
+  const results: TokenBalance[] = [];
 
-  return tokenIds.map((tokenId, i) => ({
-    tokenId,
-    balance: balances[i],
-  }));
+  for (let i = 0; i < tokenIds.length; i += BATCH_SIZE) {
+    const chunk = tokenIds.slice(i, i + BATCH_SIZE);
+    const addresses = chunk.map(() => wallet.address);
+    const balances: BigNumber[] = await ct.balanceOfBatch(addresses, chunk);
+
+    for (let j = 0; j < chunk.length; j++) {
+      results.push({ tokenId: chunk[j], balance: balances[j] });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Discover ERC1155 token IDs held by wallet by scanning TransferSingle/TransferBatch
+ * events on the ConditionalTokens contract, then checking current balances.
+ * Returns only tokens with non-zero balance.
+ *
+ * @param fromBlock - Block to start scanning from (default: last ~6 months on Polygon)
+ */
+const BLOCK_RANGE = 5000; // Max range per eth_getLogs query on most RPCs
+
+export async function discoverHeldTokens(
+  wallet: Wallet,
+  env: EnvConfig,
+  fromBlock?: number,
+): Promise<TokenBalance[]> {
+  const provider = new ethers.providers.JsonRpcProvider(env.polygonRpcUrl);
+  const ct = new Contract(CONDITIONAL_TOKENS, ERC1155_BALANCE_ABI, provider);
+
+  const currentBlock = await provider.getBlockNumber();
+  // Default: ~6 months back (Polygon ~2s blocks → ~7.8M blocks in 6mo)
+  const startBlock = fromBlock ?? Math.max(0, currentBlock - 7_800_000);
+
+  const tokenIdSet = new Set<string>();
+
+  // Scan in chunks to stay within RPC log query limits
+  for (let from = startBlock; from <= currentBlock; from += BLOCK_RANGE) {
+    const to = Math.min(from + BLOCK_RANGE - 1, currentBlock);
+
+    // TransferSingle: indexed(operator, from, to), id, value
+    const singleFilter = ct.filters.TransferSingle(null, null, wallet.address);
+    const singleLogs = await ct.queryFilter(singleFilter, from, to);
+    for (const log of singleLogs) {
+      if (log.args) {
+        tokenIdSet.add(log.args.id.toString());
+      }
+    }
+
+    // TransferBatch: indexed(operator, from, to), ids[], values[]
+    const batchFilter = ct.filters.TransferBatch(null, null, wallet.address);
+    const batchLogs = await ct.queryFilter(batchFilter, from, to);
+    for (const log of batchLogs) {
+      if (log.args) {
+        for (const id of log.args.ids) {
+          tokenIdSet.add(id.toString());
+        }
+      }
+    }
+
+    // Progress log every 50k blocks
+    if ((from - startBlock) % 50_000 < BLOCK_RANGE) {
+      const pct = Math.round(((from - startBlock) / (currentBlock - startBlock)) * 100);
+      if (pct > 0 && pct < 100) {
+        process.stdout.write(`\r  Scanning events... ${pct}%`);
+      }
+    }
+  }
+
+  if (tokenIdSet.size > 0) {
+    process.stdout.write(`\r  Found ${tokenIdSet.size} unique token IDs from events\n`);
+  }
+
+  if (tokenIdSet.size === 0) return [];
+
+  // Check current balances for discovered tokens
+  const tokenIds = [...tokenIdSet];
+  const balances = await getTokenBalances(wallet, env, tokenIds);
+  return balances.filter((b) => !b.balance.isZero());
 }
 
 /**

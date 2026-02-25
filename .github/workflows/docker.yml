@@ -108,13 +108,18 @@ jobs:
             EOF
             
             # Start new container
+            # NO-FILL STRATEGY: Wide spreads to avoid getting filled
+            # --spread 20: Place orders 20c from midpoint (safer than 5c)
+            # --danger-zone 5: Cancel orders if within 5c of midpoint
+            # --max-markets 5: Focus on fewer, safer markets
+            # --rebalance-interval 120: Check for calmer markets every 2h
             docker run -d \
               --name polyfarm \
               --restart unless-stopped \
               -v /opt/farmpoly-data:/data \
               --env-file /opt/farmpoly/.env \
               ghcr.io/${{ github.repository }}:latest \
-              run --budget 100 --spread 5 --max-markets 10 --rebalance-interval 60 --min-daily-yield 1
+              run --budget 100 --spread 20 --danger-zone 5 --max-markets 5 --rebalance-interval 120 --min-daily-yield 0.5
             
             # Wait for container to start and verify it's running
             sleep 5
