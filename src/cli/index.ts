@@ -6,6 +6,8 @@ import { runCommand } from "./commands/run.js";
 import { statusCommand } from "./commands/status.js";
 import { panicCommand } from "./commands/panic.js";
 import { dashboardCommand } from "./commands/dashboard.js";
+import { redeemCommand } from "./commands/redeem.js";
+import { killallCommand } from "./commands/killall.js";
 
 const program = new Command();
 
@@ -20,5 +22,7 @@ program.addCommand(runCommand);
 program.addCommand(statusCommand);
 program.addCommand(panicCommand);
 program.addCommand(dashboardCommand);
+program.addCommand(redeemCommand);
+program.addCommand(killallCommand);
 
 program.parse();

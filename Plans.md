@@ -153,7 +153,7 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 > **Context**: Phases 9+10 fixes are committed but NOT deployed. Server is running pre-Phase 9 image.
 > Issue #5 confirms: heartbeat self-recovered after ~9h, but ASK orders still fail with "not enough balance / allowance" — this is the ERC1155 approval issue from 9.1.
 
-### 11.1 Fix GHCR auth + redeploy latest image — cc:TODO
+### 11.1 Fix GHCR auth + redeploy latest image — cc:DONE
 
 **Problem**: `docker pull ghcr.io/sneg55/farmpoly:latest` fails with "denied" on Helsinki server. The PAT stored in `/root/.docker/config.json` may have expired.
 
@@ -165,7 +165,7 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 
 **Files**: Server-side only (SSH)
 
-### 11.2 Run `polyfarm init --approve` to grant ERC1155 approvals — cc:TODO
+### 11.2 Run `polyfarm init --approve` to grant ERC1155 approvals — cc:DONE
 
 **Problem**: Phase 9.1 added `checkConditionalTokenApproval` + `approveConditionalTokens` to the code, and `polyfarm init --approve` now calls them. But the on-chain `setApprovalForAll` transactions were never sent because the new code hasn't been deployed+run yet.
 
@@ -177,7 +177,7 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 
 **Files**: Server-side only (SSH + docker exec)
 
-### 11.3 Restart daemon and verify BID+ASK both place — cc:TODO
+### 11.3 Restart daemon and verify BID+ASK both place — cc:DONE
 
 **Problem**: After approvals are granted, restart the daemon and verify both BID and ASK orders succeed.
 
@@ -189,11 +189,209 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 
 **Files**: Server-side only (SSH)
 
-### 11.4 Close GitHub issues #4 and #5 with resolution notes — cc:TODO
+### 11.4 Close GitHub issues #4 and #5 with resolution notes — cc:DONE
 
 **Fix**: After 11.3 is verified, close both issues with a comment summarizing the root causes and fixes.
 
 **Files**: GitHub CLI
+
+---
+
+## Phase 12: `redeem` + `killall` CLI Commands — DONE
+
+> **Goal**: Add two new CLI commands — `polyfarm redeem` to claim USDC from resolved markets, and `polyfarm killall` to immediately market-sell all open positions.
+
+### 12.1 Add position fetcher module — cc:DONE
+
+**Purpose**: Shared module to discover what the wallet holds — both open CLOB positions and on-chain conditional token balances. Used by both `redeem` and `killall`.
+
+**Implementation** (`src/positions/fetcher.ts`):
+
+1. **`getOpenPositions(clobClient)`** — Wrapper around `clobClient.getOpenOrders()` that paginates (the API paginates via `next_cursor`). Returns all open orders grouped by market (condition_id).
+
+2. **`getTokenBalances(wallet, env, tokenIds)`** — Call `ConditionalTokens.balanceOf(address, tokenId)` for each token ID. The ERC1155 `balanceOf(address, id)` returns the on-chain balance. Use `Promise.all` for parallel fetches.
+
+3. **`getPositionSummary(clobClient, wallet, env, db)`** — Combines open orders + on-chain balances for all known markets (from `db.getMarkets()`). Returns array of `{ conditionId, question, tokenIdYes, tokenIdNo, balanceYes, balanceNo, openOrders[], negRisk }`.
+
+**ABI fragment needed**:
+```ts
+const ERC1155_BALANCE_ABI = [
+  "function balanceOf(address account, uint256 id) view returns (uint256)",
+  "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+];
+```
+
+Use `balanceOfBatch` for efficiency — single call with repeated wallet address and all token IDs.
+
+**Contract**: ConditionalTokens `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` (already in `approval.ts`).
+
+**Test** (`tests/unit/fetcher.test.ts`):
+- Mock ClobClient.getOpenOrders → returns sample orders → verify grouping
+- Mock ERC1155 balanceOfBatch → verify token balances parsed correctly
+- Verify getPositionSummary merges both sources
+
+**Files**: `src/positions/fetcher.ts`, `tests/unit/fetcher.test.ts`
+
+---
+
+### 12.2 Add redeemer module — cc:DONE
+
+**Purpose**: Core logic to redeem resolved conditional token positions for USDC.
+
+**Implementation** (`src/positions/redeemer.ts`):
+
+1. **`redeemPosition(wallet, env, conditionId, negRisk)`**:
+   - For **standard markets** (negRisk=false): Call `ConditionalTokens.redeemPositions(collateralToken, parentCollectionId, conditionId, indexSets)` directly.
+     - `collateralToken` = USDC `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
+     - `parentCollectionId` = `ethers.constants.HashZero` (bytes32 zero)
+     - `conditionId` = market's condition ID (bytes32)
+     - `indexSets` = `[1, 2]` (both YES and NO outcomes for binary markets)
+   - For **negRisk markets** (negRisk=true): Call `NegRiskAdapter.redeemPositions(conditionId, amounts)` instead.
+     - `NegRiskAdapter` = `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`
+     - This adapter unwraps the wrapped collateral back to USDC automatically.
+
+2. **`redeemAll(wallet, env, positions)`** — Iterate all positions that have non-zero balance, call `redeemPosition` for each. Log results. Use `Promise.allSettled` to handle individual failures without aborting.
+
+**ABI fragments**:
+```ts
+const CTF_REDEEM_ABI = [
+  "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+];
+const NEG_RISK_REDEEM_ABI = [
+  "function redeemPositions(bytes32 conditionId, uint256[] amounts)",
+];
+```
+
+**Key detail**: `redeemPositions` burns the **entire** token balance — there's no amount parameter for standard CTF. It only pays out for winning tokens; losing tokens yield $0. The call is safe to make even for losing positions (just burns them for nothing).
+
+**Test** (`tests/unit/redeemer.test.ts`):
+- Mock CTF contract → verify `redeemPositions` called with correct params for standard market
+- Mock NegRiskAdapter → verify called with correct params for negRisk market
+- Verify redeemAll handles mixed success/failure via Promise.allSettled
+- Verify zero-balance positions are skipped
+
+**Files**: `src/positions/redeemer.ts`, `tests/unit/redeemer.test.ts`
+
+---
+
+### 12.3 Add market sell module — cc:DONE
+
+**Purpose**: Core logic to immediately sell all open positions at market price.
+
+**Implementation** (`src/positions/seller.ts`):
+
+1. **`marketSellPosition(clobClient, tokenId, balance, negRisk, tickSize)`**:
+   - Uses `clobClient.createAndPostMarketOrder()` with:
+     ```ts
+     {
+       tokenID: tokenId,
+       amount: balance,    // For SELL: this is shares to sell
+       side: Side.SELL,
+     }
+     ```
+   - Order type: `OrderType.FOK` (Fill or Kill) — either fill entirely or cancel. Fallback to `OrderType.FAK` (Fill and Kill — partial fill OK) if FOK fails.
+   - Uses SDK's `createOrderOptions` with `{ tickSize, negRisk }`.
+
+2. **`killAllPositions(clobClient, wallet, env, db)`**:
+   - Step 1: `clobClient.cancelAll()` — Cancel all open limit orders first (avoids conflicts).
+   - Step 2: Get all on-chain token balances via `getTokenBalances()`.
+   - Step 3: For each token with balance > 0, call `marketSellPosition()`.
+   - Step 4: Update DB — mark all orders cancelled, end active session as "PANIC".
+   - Returns summary: `{ cancelled: number, sold: { tokenId, amount, price }[], failed: string[] }`.
+
+**Important**: Market sells go through the CLOB orderbook, not on-chain. The CLOB API handles the matching. If there's no liquidity on the other side, the order will fail (FOK) or partially fill (FAK).
+
+**Test** (`tests/unit/seller.test.ts`):
+- Mock clobClient.createAndPostMarketOrder → verify correct params
+- Mock clobClient.cancelAll → verify called first before sells
+- Verify FOK→FAK fallback on failure
+- Verify zero-balance tokens skipped
+- Verify DB updated after killall
+
+**Files**: `src/positions/seller.ts`, `tests/unit/seller.test.ts`
+
+---
+
+### 12.4 Add `polyfarm redeem` CLI command — cc:DONE
+
+**Purpose**: CLI command to redeem all resolved market positions for USDC.
+
+**Implementation** (`src/cli/commands/redeem.ts`):
+
+```
+polyfarm redeem [--dry-run] [--market <conditionId>]
+```
+
+**Options**:
+- `--dry-run` — Show what would be redeemed without sending transactions
+- `--market <id>` — Redeem only a specific market (by condition ID)
+
+**Flow**:
+1. Load env + derive/load credentials
+2. Fetch all token balances via `getTokenBalances()` for all known markets from DB
+3. Filter to positions with non-zero balance
+4. Display table: Question | Side | Balance | NegRisk
+5. If `--dry-run`, stop here
+6. Call `redeemAll()` for all positions
+7. Display results: success count, USDC redeemed, any failures
+
+**Register** in `src/cli/index.ts`.
+
+**Test** (`tests/unit/redeem-cmd.test.ts`):
+- Verify command exists and has correct options
+- Integration: mock position fetcher + redeemer, verify flow
+
+**Files**: `src/cli/commands/redeem.ts`, `src/cli/index.ts`, `tests/unit/redeem-cmd.test.ts`
+
+---
+
+### 12.5 Add `polyfarm killall` CLI command — cc:DONE
+
+**Purpose**: Emergency command to immediately market-sell all open positions.
+
+**Implementation** (`src/cli/commands/killall.ts`):
+
+```
+polyfarm killall [--dry-run] [--skip-cancel]
+```
+
+**Options**:
+- `--dry-run` — Show positions that would be sold without executing
+- `--skip-cancel` — Skip cancelling open limit orders first (if already cancelled via `panic`)
+
+**Flow**:
+1. Load env + derive/load credentials
+2. Print bold red warning: "KILLALL: This will MARKET SELL all positions at current prices"
+3. Fetch all on-chain token balances
+4. Display table: Token | Balance | Est. Value (from midpoint)
+5. If `--dry-run`, stop here
+6. Call `killAllPositions()` — cancels orders + market sells everything
+7. Display results: orders cancelled, positions sold (amount + price), any failures
+8. `process.exit(0)` on success
+
+**Register** in `src/cli/index.ts`.
+
+**Key difference from `panic`**: `panic` only cancels unfilled limit orders. `killall` also actively sells any held token positions (shares that were acquired from filled orders).
+
+**Test** (`tests/unit/killall-cmd.test.ts`):
+- Verify command exists and has correct options
+- Integration: mock position modules, verify flow
+
+**Files**: `src/cli/commands/killall.ts`, `src/cli/index.ts`, `tests/unit/killall-cmd.test.ts`
+
+---
+
+### 12.6 Export contract constants to shared module — cc:DONE
+
+**Purpose**: Refactor contract addresses and ABI fragments out of `approval.ts` into `src/contracts/addresses.ts` so `approval.ts`, `redeemer.ts`, `fetcher.ts`, and `seller.ts` all import from one place.
+
+**Implementation** (`src/contracts/addresses.ts`):
+- Move all contract addresses (USDC, CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE, NEG_RISK_ADAPTER, CONDITIONAL_TOKENS) here
+- Move ABI fragments (ERC20_ABI, ERC1155_ABI) here
+- Add new ABI fragments (CTF_REDEEM_ABI, NEG_RISK_REDEEM_ABI, ERC1155_BALANCE_ABI)
+- Update `approval.ts` to import from this module
+
+**Files**: `src/contracts/addresses.ts`, `src/auth/approval.ts`
 
 ---
 

@@ -1,32 +1,15 @@
 import { Contract, Wallet, ethers } from "ethers";
 import type { BigNumber } from "ethers";
 import type { EnvConfig } from "../utils/config.js";
-
-// Polygon USDC (PoS bridged)
-const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-
-// Polymarket CTF Exchange contract
-const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
-
-// NegRisk CTF Exchange
-const NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
-
-// NegRisk Adapter
-const NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
-
-// ConditionalTokens ERC1155 contract
-const CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
-
-const ERC20_ABI = [
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function balanceOf(address owner) view returns (uint256)",
-];
-
-const ERC1155_ABI = [
-  "function isApprovedForAll(address owner, address operator) view returns (bool)",
-  "function setApprovalForAll(address operator, bool approved)",
-];
+import {
+  USDC_ADDRESS,
+  CTF_EXCHANGE,
+  NEG_RISK_CTF_EXCHANGE,
+  NEG_RISK_ADAPTER,
+  CONDITIONAL_TOKENS,
+  ERC20_ABI,
+  ERC1155_ABI,
+} from "../contracts/addresses.js";
 
 const MAX_UINT256 = ethers.constants.MaxUint256;
 
