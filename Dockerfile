@@ -27,5 +27,6 @@ COPY --from=builder /app/dist/ dist/
 RUN mkdir -p /data
 ENV POLYFARM_DB_PATH=/data/polyfarm.db
 
+EXPOSE 3737
 ENTRYPOINT ["node", "dist/cli/index.js"]
 CMD ["run", "--budget", "30", "--spread", "3", "--max-markets", "3", "--hedge-fills", "--placement-mode", "adaptive"]

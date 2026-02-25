@@ -9,12 +9,14 @@ const CHAIN_ID = 137;
 
 export const dashboardCommand = new Command("dashboard")
   .description("Start a web dashboard to monitor the bot")
-  .option("--port <number>", "HTTP port", "3737")
-  .option("--host <addr>", "Bind address (use 0.0.0.0 for all interfaces)", "127.0.0.1")
+  .option("--port <number>", "HTTP port", process.env.POLYFARM_DASHBOARD_PORT ?? "3737")
+  .option("--host <addr>", "Bind address (use 0.0.0.0 for all interfaces)", process.env.POLYFARM_DASHBOARD_HOST ?? "127.0.0.1")
+  .option("--auth-token <token>", "Bearer token required for dashboard access", process.env.POLYFARM_DASHBOARD_TOKEN)
   .action(async (opts) => {
     try {
       const port = parseInt(opts.port);
       const host = opts.host;
+      const authToken: string | undefined = opts.authToken;
       const rawDb = createDatabase();
       const db = new PolyfarmDb(rawDb);
 
@@ -44,10 +46,20 @@ export const dashboardCommand = new Command("dashboard")
         // No CLOB client available, panic will only update DB
       }
 
-      const server = await startDashboard({ port, host, db, onPanic: panicFn });
+      const server = await startDashboard({ port, host, db, onPanic: panicFn, authToken });
 
       console.log(chalk.bold(`PolyFarm Dashboard running at:`));
       console.log(chalk.blue.underline(`  http://${host}:${port}`));
+
+      if (host === "0.0.0.0" && !authToken) {
+        console.log(chalk.yellow.bold("\nWARNING: Dashboard is bound to all interfaces with no auth token. Set --auth-token or POLYFARM_DASHBOARD_TOKEN to secure access."));
+      }
+
+      if (authToken) {
+        const masked = authToken.slice(0, 4) + "*".repeat(Math.max(0, authToken.length - 4));
+        console.log(chalk.dim(`Auth token: ${masked}`));
+      }
+
       console.log(chalk.dim("\nPress Ctrl+C to stop\n"));
 
       const shutdown = () => {
