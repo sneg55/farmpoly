@@ -123,7 +123,7 @@ jobs:
               -v /opt/farmpoly-data:/data \
               --env-file /opt/farmpoly/.env \
               ghcr.io/${{ github.repository }}:latest \
-              run --budget 100 --spread 2 --danger-zone 3 --max-markets 5 --max-volatility 5 --placement-mode adaptive --hedge-fills --warmup-seconds 5 --rebalance-interval 60
+              run --budget 500 --spread 2 --danger-zone 3 --max-markets 5 --max-volatility 5 --placement-mode adaptive --hedge-fills --warmup-seconds 5 --rebalance-interval 60
             
             # Wait for container to start and verify it's running
             sleep 5
