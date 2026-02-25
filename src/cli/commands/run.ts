@@ -333,11 +333,18 @@ export const runCommand = new Command("run")
       // We must check response.error BEFORE using response.heartbeat_id.
       let heartbeatFailures = 0;
       let heartbeatId: string | null = null;
+      let consecutiveChainFailures = 0;
+      let heartbeatLoggedFirstSuccess = false;
+      let lastHeartbeatLogTime = 0;
       const MAX_HEARTBEAT_FAILURES = 5;
+      const MAX_CHAIN_FAILURES = 3; // After 3 chain failures, stop chaining (always send null)
       const HEARTBEAT_INTERVAL_MS = 5000; // 5s for safety margin against 10s server timeout
+      const HEARTBEAT_LOG_INTERVAL_MS = 60_000; // Log status once per minute
       const heartbeatInterval = setInterval(async () => {
         try {
-          const response = await auth.clobClient.postHeartbeat(heartbeatId) as
+          // If chaining has failed repeatedly, fall back to always sending null
+          const sendId = consecutiveChainFailures >= MAX_CHAIN_FAILURES ? null : heartbeatId;
+          const response = await auth.clobClient.postHeartbeat(sendId) as
             { heartbeat_id?: string; error?: string };
 
           // SDK returns errors as values, not exceptions
@@ -345,17 +352,35 @@ export const runCommand = new Command("run")
             const errMsg = response.error;
             if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
               // Chain expired or invalid — start fresh, don't count as failure
-              console.log(chalk.dim("Heartbeat chain expired, starting fresh..."));
+              consecutiveChainFailures++;
               heartbeatId = null;
+              if (consecutiveChainFailures === MAX_CHAIN_FAILURES) {
+                console.log(chalk.dim("Heartbeat chaining disabled after repeated failures (using null fallback)"));
+              }
               return;
             }
             // Other API errors
             heartbeatFailures++;
             console.log(chalk.yellow(`Heartbeat error (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
+            console.log(chalk.dim(`  Response: ${JSON.stringify(response)}`));
           } else if (response.heartbeat_id) {
             // Success — store the chained ID
             heartbeatId = response.heartbeat_id;
             heartbeatFailures = 0;
+            consecutiveChainFailures = 0;
+
+            // Debug: log first success response
+            if (!heartbeatLoggedFirstSuccess) {
+              heartbeatLoggedFirstSuccess = true;
+              console.log(chalk.dim(`Heartbeat OK: ${JSON.stringify(response)}`));
+            }
+
+            // Periodic status log (once per minute)
+            const now = Date.now();
+            if (now - lastHeartbeatLogTime >= HEARTBEAT_LOG_INTERVAL_MS) {
+              lastHeartbeatLogTime = now;
+              console.log(chalk.dim(`Heartbeat alive (id: ${heartbeatId.slice(0, 8)}...)`));
+            }
           } else {
             // Unexpected response shape
             heartbeatFailures++;

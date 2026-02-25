@@ -3,7 +3,12 @@ import chalk from "chalk";
 import { loadEnv } from "../../utils/config.js";
 import { createDatabase, PolyfarmDb } from "../../db/database.js";
 import { deriveOrLoadCreds } from "../../auth/credentials.js";
-import { checkApproval, approveUSDC } from "../../auth/approval.js";
+import {
+  checkApproval,
+  approveUSDC,
+  checkConditionalTokenApproval,
+  approveConditionalTokens,
+} from "../../auth/approval.js";
 
 export const initCommand = new Command("init")
   .description("Initialize: derive API keys, check USDC approval")
@@ -48,6 +53,37 @@ export const initCommand = new Command("init")
         }
       } else {
         console.log(chalk.green("  USDC already approved for both exchanges"));
+      }
+
+      // 5. Check ConditionalTokens ERC1155 approval (required for SELL orders)
+      console.log("\nChecking ConditionalTokens (ERC1155) approval...");
+      const ctStatus = await checkConditionalTokenApproval(auth.wallet, env);
+
+      if (ctStatus.needsAnyApproval) {
+        const missing: string[] = [];
+        if (ctStatus.needsCtfExchangeApproval) missing.push("CTF Exchange");
+        if (ctStatus.needsNegRiskExchangeApproval) missing.push("NegRisk Exchange");
+        if (ctStatus.needsNegRiskAdapterApproval) missing.push("NegRisk Adapter");
+
+        if (opts.approve) {
+          console.log(`  Approving ConditionalTokens for: ${missing.join(", ")}...`);
+          const ctTxs = await approveConditionalTokens(auth.wallet, env);
+          if (ctTxs.ctfExchangeTxHash)
+            console.log(chalk.green(`  CTF Exchange (ERC1155): ${ctTxs.ctfExchangeTxHash}`));
+          if (ctTxs.negRiskExchangeTxHash)
+            console.log(chalk.green(`  NegRisk Exchange (ERC1155): ${ctTxs.negRiskExchangeTxHash}`));
+          if (ctTxs.negRiskAdapterTxHash)
+            console.log(chalk.green(`  NegRisk Adapter (ERC1155): ${ctTxs.negRiskAdapterTxHash}`));
+        } else {
+          console.log(
+            chalk.yellow(`  ConditionalTokens approval needed for: ${missing.join(", ")}`),
+          );
+          console.log(
+            chalk.yellow("  Run with --approve to auto-approve. Required for SELL orders."),
+          );
+        }
+      } else {
+        console.log(chalk.green("  ConditionalTokens approved for all spenders"));
       }
 
       console.log(chalk.bold.green("\nInitialization complete!"));

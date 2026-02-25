@@ -76,6 +76,40 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 - [x] 8.3 Fix balance: cancel stale orders at startup + 2% safety margin on budget
 - [x] 8.4 Add heartbeat tests (11 tests in heartbeat.test.ts)
 
+## Phase 9: Production Bug Fixes Round 3 (GitHub Issue #3) — DONE
+
+> **Ref**: [GitHub Issue #3](https://github.com/sneg55/farmpoly/issues/3)
+> **Note**: Issue filed on commit 21b4a8e (pre-Phase 8). Phase 8 fix (432209b) not yet deployed.
+
+### 9.1 Add ERC1155 Conditional Token approvals for SELL orders — cc:DONE
+
+**Bug**: All ASK (SELL) orders fail with "not enough balance / allowance" while BID (BUY) succeed.
+
+**Root cause** (confirmed via [py-clob-client#265](https://github.com/Polymarket/py-clob-client/issues/265) + SDK source): SELL orders require `setApprovalForAll()` on the ConditionalTokens ERC1155 contract to both exchanges + NegRiskAdapter. Our `approval.ts` only approves USDC (ERC20).
+
+**Fix**: Add `isApprovedForAll` check + `setApprovalForAll` for ConditionalTokens (`0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`) to 3 spenders: CTF Exchange (`0x4bFb...82E`), NegRisk Exchange (`0xC5d...80a`), NegRiskAdapter (`0xd91...296`). Update `checkApproval` + `polyfarm init`.
+
+**Files**: `src/auth/approval.ts`, `src/cli/commands/init.ts`
+
+### 9.2 Heartbeat resilience — debug logging + null-only fallback — cc:DONE
+
+**Bug**: Heartbeat loops null→ID→"Invalid"→null every 5s. Issue was filed pre-Phase 8 — the old code read `heartbeat_id` from error responses (SDK returns errors as values). Phase 8 fix (432209b) properly checks `response.error` first, which likely resolves the root cause.
+
+**Remaining risk**: If chaining still fails after Phase 8 deploy, orders stay alive (null resets the 10s timeout each call) but logs are noisy.
+
+**Fix** (defensive):
+1. Add debug logging: log response JSON on first success + on errors (dimmed)
+2. After 3 consecutive chain failures, stop chaining — always send null (silent)
+3. Log heartbeat status once per minute instead of every 5s
+
+**Files**: `src/cli/commands/run.ts`
+
+### 9.3 Add approval tests — cc:DONE
+
+**Test**: Unit tests for ERC1155 approval flow with mocked contracts.
+
+**Files**: `tests/unit/approval.test.ts`
+
 ## Known Issues
 
 | Issue | Status | Detail |
@@ -85,6 +119,8 @@ Blocked by Polymarket geoblock — Singapore is "Close-Only" since Jan 2025.
 | Heartbeat SDK quirk | Fixed (8.1) | SDK returns `{ error }` instead of throwing |
 | Min size constraints | Fixed (8.2) | `2 × max(bidCost, askCost)` formula |
 | Balance/allowance | Fixed (8.3) | Stale order cleanup + 2% margin |
+| ASK orders fail | Fixed (9.1) | ERC1155 ConditionalToken approvals added |
+| Heartbeat loop | Fixed (9.2) | Debug logging + null-only fallback after 3 chain failures |
 
 ## Deployment
 
