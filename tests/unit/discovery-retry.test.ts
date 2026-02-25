@@ -21,6 +21,7 @@ function createGammaMarket(overrides: Partial<GammaMarket> = {}): GammaMarket {
     id: "test-id",
     conditionId: "cond-1",
     question: "Will it rain?",
+    slug: "will-it-rain",
     tokenIdYes: "yes-1",
     tokenIdNo: "no-1",
     priceYes: 0.50,
@@ -155,6 +156,7 @@ describe("allocateCapitalSmart with unaffordable markets", () => {
   ): RewardMarket => ({
     conditionId: id,
     question: `Market ${id}`,
+    slug: `market-${id.toLowerCase()}`,
     tokenIdYes: `yes-${id}`,
     tokenIdNo: `no-${id}`,
     midpoint: 0.5,

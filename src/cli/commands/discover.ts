@@ -94,6 +94,7 @@ export const discoverCommand = new Command("discover")
           db.upsertMarket({
             condition_id: m.conditionId,
             question: m.question,
+            slug: m.slug || "",
             token_id_yes: m.tokenIdYes,
             token_id_no: m.tokenIdNo,
             tick_size: m.tickSize,

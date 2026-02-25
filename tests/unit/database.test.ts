@@ -20,6 +20,7 @@ describe("PolyfarmDb", () => {
       db.upsertMarket({
         condition_id: "cond1",
         question: "Will X happen?",
+        slug: "will-x-happen",
         token_id_yes: "tok_yes",
         token_id_no: "tok_no",
         tick_size: "0.01",
@@ -39,6 +40,7 @@ describe("PolyfarmDb", () => {
       db.upsertMarket({
         condition_id: "cond1",
         question: "Will X happen?",
+        slug: "will-x-happen",
         token_id_yes: "tok_yes",
         token_id_no: "tok_no",
         tick_size: "0.01",
@@ -51,6 +53,7 @@ describe("PolyfarmDb", () => {
       db.upsertMarket({
         condition_id: "cond1",
         question: "Will X happen?",
+        slug: "will-x-happen",
         token_id_yes: "tok_yes",
         token_id_no: "tok_no",
         tick_size: "0.01",
@@ -72,6 +75,7 @@ describe("PolyfarmDb", () => {
       db.upsertMarket({
         condition_id: conditionId,
         question: "Test?",
+        slug: "test",
         token_id_yes: "tok1",
         token_id_no: "tok2",
         tick_size: "0.01",

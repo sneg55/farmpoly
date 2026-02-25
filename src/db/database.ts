@@ -13,12 +13,16 @@ export function createDatabase(dbPath: string = process.env.POLYFARM_DB_PATH || 
   const schema = readFileSync(path.join(__dirname, "schema.sql"), "utf-8");
   db.exec(schema);
 
+  // Migrations: add columns to existing tables (safe to re-run)
+  try { db.exec("ALTER TABLE markets ADD COLUMN slug TEXT NOT NULL DEFAULT ''"); } catch { /* already exists */ }
+
   return db;
 }
 
 export interface MarketRow {
   condition_id: string;
   question: string;
+  slug: string;
   token_id_yes: string;
   token_id_no: string;
   tick_size: string;
@@ -94,10 +98,10 @@ export class PolyfarmDb {
   constructor(public db: Database.Database) {
     this.stmts = {
       upsertMarket: db.prepare(
-        `INSERT INTO markets (condition_id, question, token_id_yes, token_id_no, tick_size, neg_risk, midpoint, tvl, reward_rate)
-         VALUES (@condition_id, @question, @token_id_yes, @token_id_no, @tick_size, @neg_risk, @midpoint, @tvl, @reward_rate)
+        `INSERT INTO markets (condition_id, question, slug, token_id_yes, token_id_no, tick_size, neg_risk, midpoint, tvl, reward_rate)
+         VALUES (@condition_id, @question, @slug, @token_id_yes, @token_id_no, @tick_size, @neg_risk, @midpoint, @tvl, @reward_rate)
          ON CONFLICT(condition_id) DO UPDATE SET
-           question=excluded.question, midpoint=excluded.midpoint, tvl=excluded.tvl,
+           question=excluded.question, slug=excluded.slug, midpoint=excluded.midpoint, tvl=excluded.tvl,
            reward_rate=excluded.reward_rate, last_updated=unixepoch()`,
       ),
       getMarkets: db.prepare("SELECT * FROM markets ORDER BY reward_rate DESC"),

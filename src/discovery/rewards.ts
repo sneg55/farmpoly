@@ -4,6 +4,7 @@ import { calculateStabilityScore, isTooVolatile } from "../intelligence/stabilit
 export interface RewardMarket {
   conditionId: string;
   question: string;
+  slug: string;
   tokenIdYes: string;
   tokenIdNo: string;
   midpoint: number;
@@ -204,6 +205,7 @@ export function filterRewardMarkets(
     rewardMarkets.push({
       conditionId: market.conditionId,
       question: market.question,
+      slug: market.slug,
       tokenIdYes: market.tokenIdYes,
       tokenIdNo: market.tokenIdNo,
       midpoint,

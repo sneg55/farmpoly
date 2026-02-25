@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS markets (
   condition_id TEXT PRIMARY KEY,
   question TEXT NOT NULL,
+  slug TEXT NOT NULL DEFAULT '',
   token_id_yes TEXT NOT NULL,
   token_id_no TEXT NOT NULL,
   tick_size TEXT NOT NULL DEFAULT '0.01',

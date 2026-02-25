@@ -23,6 +23,7 @@ function makeMarket(overrides: Partial<RewardMarket> = {}): RewardMarket {
   return {
     conditionId: "cond_1",
     question: "Test market?",
+    slug: "test-market",
     tokenIdYes: "tok_yes_1",
     tokenIdNo: "tok_no_1",
     midpoint: 0.50,

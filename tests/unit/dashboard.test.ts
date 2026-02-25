@@ -97,6 +97,7 @@ describe("Dashboard Server", () => {
     db.upsertMarket({
       condition_id: "cond1",
       question: "Test?",
+      slug: "test",
       token_id_yes: "tok_yes",
       token_id_no: "tok_no",
       tick_size: "0.01",
@@ -127,6 +128,7 @@ describe("Dashboard Server", () => {
     db.upsertMarket({
       condition_id: "cond1",
       question: "Test?",
+      slug: "test",
       token_id_yes: "tok_yes",
       token_id_no: "tok_no",
       tick_size: "0.01",
@@ -193,6 +195,7 @@ describe("Dashboard Server", () => {
     db.upsertMarket({
       condition_id: "cond1",
       question: "Test?",
+      slug: "test",
       token_id_yes: "tok_yes",
       token_id_no: "tok_no",
       tick_size: "0.01",
@@ -281,6 +284,7 @@ describe("Dashboard Server", () => {
     db.upsertMarket({
       condition_id: "cond1",
       question: "Test market?",
+      slug: "test-market",
       token_id_yes: "tok_yes",
       token_id_no: "tok_no",
       tick_size: "0.01",

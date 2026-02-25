@@ -308,8 +308,11 @@ function renderMarkets(){
       const qualityBar=rs?'<div class="progress-bar"><div class="progress-fill fill-green" style="width:'+Math.round(rs.spreadQuality*100)+'%"></div></div>':'';
       const share=rs?fmt(rs.bookShare,1)+'%':'--';
       const twoSided=rs?(rs.isTwoSided?'<span class="two-sided">2x</span>':'<span class="one-sided">1x</span>'):'';
+      const qHtml = m.slug
+        ? '<a href="https://polymarket.com/event/'+esc(m.slug)+'" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">'+esc(truncQ(m.question))+'</a>'
+        : esc(truncQ(m.question));
       return '<tr>'+
-        '<td>'+esc(truncQ(m.question))+'</td>'+
+        '<td>'+qHtml+'</td>'+
         '<td>'+fmt(m.midpoint)+'</td>'+
         '<td>'+fmtUsd(m.tvl)+'</td>'+
         '<td>$'+fmt(m.reward_rate)+' '+twoSided+'</td>'+

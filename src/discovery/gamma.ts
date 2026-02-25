@@ -16,6 +16,7 @@ export interface GammaMarketRaw {
   id: string;
   conditionId: string;
   question: string;
+  slug?: string;
   outcomes: string | string[];          // JSON string e.g. '["Yes","No"]'
   outcomePrices: string | string[];     // JSON string e.g. '["0.55","0.45"]'
   clobTokenIds: string | string[];      // JSON string e.g. '["123...","456..."]'
@@ -43,6 +44,7 @@ export interface GammaMarket {
   id: string;
   conditionId: string;
   question: string;
+  slug: string;
   tokenIdYes: string;
   tokenIdNo: string;
   priceYes: number;
@@ -103,6 +105,7 @@ function normalizeMarket(raw: GammaMarketRaw): GammaMarket | null {
     id: raw.id,
     conditionId: raw.conditionId,
     question: raw.question,
+    slug: raw.slug || "",
     tokenIdYes: clobTokenIds[yesIdx],
     tokenIdNo: clobTokenIds[noIdx],
     priceYes: parseFloat(outcomePrices[yesIdx]) || 0,

@@ -125,6 +125,7 @@ export async function placeOrdersForMarkets(
     db.upsertMarket({
       condition_id: market.conditionId,
       question: market.question,
+      slug: market.slug || "",
       token_id_yes: market.tokenIdYes,
       token_id_no: market.tokenIdNo,
       tick_size: market.tickSize,

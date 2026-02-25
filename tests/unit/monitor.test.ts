@@ -16,6 +16,7 @@ function insertTestMarket(db: PolyfarmDb, conditionId: string = "cond1") {
   db.upsertMarket({
     condition_id: conditionId,
     question: "Test?",
+    slug: "test",
     token_id_yes: "tok1",
     token_id_no: "tok2",
     tick_size: "0.01",

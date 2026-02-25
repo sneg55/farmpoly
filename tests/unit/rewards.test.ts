@@ -112,6 +112,7 @@ describe("allocateCapitalSmart", () => {
   ): RewardMarket => ({
     conditionId: id,
     question: `Market ${id}`,
+    slug: `market-${id.toLowerCase()}`,
     tokenIdYes: `yes-${id}`,
     tokenIdNo: `no-${id}`,
     midpoint: 0.5,
@@ -179,6 +180,7 @@ describe("shouldRebalance", () => {
   const createMarket = (id: string, score: number): RewardMarket => ({
     conditionId: id,
     question: `Market ${id}`,
+    slug: `market-${id.toLowerCase()}`,
     tokenIdYes: `yes-${id}`,
     tokenIdNo: `no-${id}`,
     midpoint: 0.5,
