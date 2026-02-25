@@ -120,13 +120,24 @@ export async function executeHedge(
   }
 
   // On ASK fill (sold YES): NO tokens remain as directional position
+  // Skip hedge buy entirely — the minted NO tokens ARE the hedge.
+  // They'll be merged when the BID fills or on shutdown.
   if (fill.side === "SELL" && options.db && options.sessionId != null) {
     const noInventory = options.db.getInventory(options.sessionId, fill.conditionId, "NO");
     if (noInventory && noInventory.current_balance > 0) {
       console.log(
-        `  ASK filled: holding ${noInventory.current_balance.toFixed(2)} NO tokens as directional position ` +
+        `  ASK filled: holding ${noInventory.current_balance.toFixed(2)} NO tokens as natural hedge ` +
         `(will merge when BID fills or on shutdown)`,
       );
+      return {
+        status: "HEDGED",
+        hedgeOrderId: null,
+        hedgePrice: null,
+        hedgeSize: 0,
+        mergeAmount: 0,
+        mergeTxHash: null,
+        pnlCents: 0, // P&L realized on merge, not here
+      };
     }
   }
 
@@ -141,7 +152,8 @@ export async function executeHedge(
   // Price cap: complement + max hedge cost
   const priceCap = Math.min(complementPrice + options.maxHedgeCostCents / 100, 0.99);
 
-  const hedgeSize = fill.filledSize;
+  // Round hedge size to 2 decimal places (CLOB requires max 2 decimals for taker amount)
+  const hedgeSize = Math.floor(fill.filledSize * 100) / 100;
 
   if (hedgeSize <= 0) {
     return {
@@ -159,9 +171,13 @@ export async function executeHedge(
   let hedgeOrderId: string | null = null;
   let hedgePrice: number | null = null;
 
+  // Round price to tick size precision (CLOB rejects excess decimals)
+  const tickDecimals = fill.tickSize === "0.1" ? 1 : fill.tickSize === "0.001" ? 3 : fill.tickSize === "0.0001" ? 4 : 2;
+  const priceRounded = Math.floor(priceCap * Math.pow(10, tickDecimals)) / Math.pow(10, tickDecimals);
+
   const orderParams = {
     tokenID: hedgeTokenId,
-    price: priceCap,
+    price: priceRounded,
     size: hedgeSize,
     side: hedgeSide,
   };
@@ -176,7 +192,7 @@ export async function executeHedge(
     const response = await clobClient.postOrder(order, OrderType.FOK);
     if (response && (response.orderID || response.id)) {
       hedgeOrderId = response.orderID || response.id;
-      hedgePrice = priceCap;
+      hedgePrice = priceRounded;
     }
   } catch (fokErr) {
     // FOK failed (no liquidity for full fill), try FAK below
@@ -189,7 +205,7 @@ export async function executeHedge(
       const response = await clobClient.postOrder(order, OrderType.FAK);
       if (response && (response.orderID || response.id)) {
         hedgeOrderId = response.orderID || response.id;
-        hedgePrice = priceCap;
+        hedgePrice = priceRounded;
       }
     } catch (fakErr) {
       const errMsg = (fakErr as Error).message || String(fakErr);
