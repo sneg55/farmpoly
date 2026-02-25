@@ -42,7 +42,7 @@ export const runCommand = new Command("run")
   .option("--placement-mode <mode>", "adaptive | bid-only | ask-only | both", "adaptive")
   .option("--warmup-seconds <s>", "Collect WS data before placing orders", "5")
   .option("--exit-on-empty", "Exit immediately if no markets found (default: retry with backoff)", false)
-  .option("--no-mint", "Disable token minting (BID-only mode for ASK)", false)
+  .option("--no-mint", "Disable token minting (BID-only mode for ASK)")
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);

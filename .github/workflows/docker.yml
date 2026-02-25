@@ -108,13 +108,13 @@ jobs:
             EOF
             
             # Start new container
-            # DEFENSIVE LIQUIDITY v2: Earn rewards with smart protection
-            # --spread 3: Target 3c from midpoint (clamped to market's rewardsMaxSpread)
+            # TWO-SIDED LIQUIDITY: Mint-and-quote with 2x reward multiplier
+            # --spread 2: Target 2c from midpoint (67% spread quality vs 27% at 3c)
             # --danger-zone 3: Graduated response (yellow warning at 3c, red cancel at 1.5c)
             # --max-markets 5: Focus on top 5 by profitability × stability
             # --max-volatility 5: Skip markets with >5c 24h price change
-            # --placement-mode adaptive: One-sided orders based on trend detection
-            # --hedge-fills: Auto-hedge any fills (buy opposite + merge → ~$1 back)
+            # --placement-mode adaptive: Trend-based order placement
+            # --hedge-fills: Auto-hedge fills (inventory merge → hedge fallback → on-chain merge)
             # --warmup-seconds 5: Collect WS midpoints before placing orders
             # --rebalance-interval 60: Re-score markets every hour
             docker run -d \
@@ -123,7 +123,7 @@ jobs:
               -v /opt/farmpoly-data:/data \
               --env-file /opt/farmpoly/.env \
               ghcr.io/${{ github.repository }}:latest \
-              run --budget 100 --spread 3 --danger-zone 3 --max-markets 5 --max-volatility 5 --placement-mode adaptive --hedge-fills --warmup-seconds 5 --rebalance-interval 60 --min-daily-yield 0.5
+              run --budget 100 --spread 2 --danger-zone 3 --max-markets 5 --max-volatility 5 --placement-mode adaptive --hedge-fills --warmup-seconds 5 --rebalance-interval 60 --min-daily-yield 0.5
             
             # Wait for container to start and verify it's running
             sleep 5
