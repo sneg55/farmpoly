@@ -58,78 +58,96 @@ export interface SessionRow {
 }
 
 export class PolyfarmDb {
-  constructor(public db: Database.Database) {}
+  // Cached prepared statements (prepared once, reused on every call)
+  private readonly stmts;
 
-  // Markets
-  upsertMarket(market: Omit<MarketRow, "last_updated">): void {
-    this.db
-      .prepare(
+  constructor(public db: Database.Database) {
+    this.stmts = {
+      upsertMarket: db.prepare(
         `INSERT INTO markets (condition_id, question, token_id_yes, token_id_no, tick_size, neg_risk, midpoint, tvl, reward_rate)
          VALUES (@condition_id, @question, @token_id_yes, @token_id_no, @tick_size, @neg_risk, @midpoint, @tvl, @reward_rate)
          ON CONFLICT(condition_id) DO UPDATE SET
            question=excluded.question, midpoint=excluded.midpoint, tvl=excluded.tvl,
            reward_rate=excluded.reward_rate, last_updated=unixepoch()`,
-      )
-      .run(market);
+      ),
+      getMarkets: db.prepare("SELECT * FROM markets ORDER BY reward_rate DESC"),
+      insertOrder: db.prepare(
+        `INSERT INTO orders (order_id, condition_id, token_id, side, price, size, order_type, status, expiry)
+         VALUES (@order_id, @condition_id, @token_id, @side, @price, @size, @order_type, @status, @expiry)`,
+      ),
+      cancelOrder: db.prepare(
+        "UPDATE orders SET status='CANCELLED', cancelled_at=unixepoch() WHERE order_id=?",
+      ),
+      cancelAllOrders: db.prepare(
+        "UPDATE orders SET status='CANCELLED', cancelled_at=unixepoch() WHERE status='LIVE'",
+      ),
+      getLiveOrders: db.prepare("SELECT * FROM orders WHERE status='LIVE'"),
+      getLiveOrdersByCondition: db.prepare(
+        "SELECT * FROM orders WHERE status='LIVE' AND condition_id=?",
+      ),
+      getRecentOrders: db.prepare(
+        "SELECT * FROM orders WHERE status IN ('CANCELLED','FILLED','EXPIRED') ORDER BY cancelled_at DESC, placed_at DESC LIMIT ?",
+      ),
+      startSession: db.prepare("INSERT INTO sessions (budget_usdc, spread_cents) VALUES (?, ?)"),
+      endSession: db.prepare("UPDATE sessions SET ended_at=unixepoch(), status=? WHERE id=?"),
+      getActiveSession: db.prepare(
+        "SELECT * FROM sessions WHERE status='RUNNING' ORDER BY id DESC LIMIT 1",
+      ),
+      setConfig: db.prepare(
+        `INSERT INTO config (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=unixepoch()`,
+      ),
+      getConfig: db.prepare("SELECT value FROM config WHERE key=?"),
+      // Dedicated session stat update statements (avoids N+1 in cancel handler)
+      incrCancelled: db.prepare(
+        "UPDATE sessions SET orders_cancelled = orders_cancelled + ? WHERE id=?",
+      ),
+    };
+  }
+
+  // Markets
+  upsertMarket(market: Omit<MarketRow, "last_updated">): void {
+    this.stmts.upsertMarket.run(market);
   }
 
   getMarkets(): MarketRow[] {
-    return this.db.prepare("SELECT * FROM markets ORDER BY reward_rate DESC").all() as MarketRow[];
+    return this.stmts.getMarkets.all() as MarketRow[];
   }
 
   // Orders
   insertOrder(order: Omit<OrderRow, "placed_at" | "cancelled_at" | "filled_size">): void {
-    this.db
-      .prepare(
-        `INSERT INTO orders (order_id, condition_id, token_id, side, price, size, order_type, status, expiry)
-         VALUES (@order_id, @condition_id, @token_id, @side, @price, @size, @order_type, @status, @expiry)`,
-      )
-      .run(order);
+    this.stmts.insertOrder.run(order);
   }
 
   cancelOrder(orderId: string): void {
-    this.db
-      .prepare("UPDATE orders SET status='CANCELLED', cancelled_at=unixepoch() WHERE order_id=?")
-      .run(orderId);
+    this.stmts.cancelOrder.run(orderId);
   }
 
   cancelAllOrders(): number {
-    const result = this.db
-      .prepare("UPDATE orders SET status='CANCELLED', cancelled_at=unixepoch() WHERE status='LIVE'")
-      .run();
+    const result = this.stmts.cancelAllOrders.run();
     return result.changes;
   }
 
   getLiveOrders(): OrderRow[] {
-    return this.db.prepare("SELECT * FROM orders WHERE status='LIVE'").all() as OrderRow[];
+    return this.stmts.getLiveOrders.all() as OrderRow[];
   }
 
   getLiveOrdersByCondition(conditionId: string): OrderRow[] {
-    return this.db
-      .prepare("SELECT * FROM orders WHERE status='LIVE' AND condition_id=?")
-      .all(conditionId) as OrderRow[];
+    return this.stmts.getLiveOrdersByCondition.all(conditionId) as OrderRow[];
   }
 
   getRecentOrders(limit: number = 50): OrderRow[] {
-    return this.db
-      .prepare(
-        "SELECT * FROM orders WHERE status != 'LIVE' ORDER BY cancelled_at DESC, placed_at DESC LIMIT ?",
-      )
-      .all(limit) as OrderRow[];
+    return this.stmts.getRecentOrders.all(limit) as OrderRow[];
   }
 
   // Sessions
   startSession(budgetUsdc: number, spreadCents: number): number {
-    const result = this.db
-      .prepare("INSERT INTO sessions (budget_usdc, spread_cents) VALUES (?, ?)")
-      .run(budgetUsdc, spreadCents);
+    const result = this.stmts.startSession.run(budgetUsdc, spreadCents);
     return Number(result.lastInsertRowid);
   }
 
   endSession(id: number, status: "STOPPED" | "PANIC"): void {
-    this.db
-      .prepare("UPDATE sessions SET ended_at=unixepoch(), status=? WHERE id=?")
-      .run(status, id);
+    this.stmts.endSession.run(status, id);
   }
 
   updateSessionStats(
@@ -149,24 +167,22 @@ export class PolyfarmDb {
     this.db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id=?`).run(...values);
   }
 
+  /** Increment cancelled counter directly (avoids getActiveSession + updateSessionStats N+1) */
+  incrementCancelled(sessionId: number, count: number = 1): void {
+    this.stmts.incrCancelled.run(count, sessionId);
+  }
+
   getActiveSession(): SessionRow | undefined {
-    return this.db
-      .prepare("SELECT * FROM sessions WHERE status='RUNNING' ORDER BY id DESC LIMIT 1")
-      .get() as SessionRow | undefined;
+    return this.stmts.getActiveSession.get() as SessionRow | undefined;
   }
 
   // Config
   setConfig(key: string, value: string): void {
-    this.db
-      .prepare(
-        `INSERT INTO config (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=unixepoch()`,
-      )
-      .run(key, value);
+    this.stmts.setConfig.run(key, value);
   }
 
   getConfig(key: string): string | undefined {
-    const row = this.db.prepare("SELECT value FROM config WHERE key=?").get(key) as
+    const row = this.stmts.getConfig.get(key) as
       | { value: string }
       | undefined;
     return row?.value;

@@ -88,8 +88,24 @@ export async function placeOrdersForMarkets(
   const { perSideUsdc: defaultPerSide } = allocateBudget(totalBudgetUsdc, markets.length);
   
   const placedOrders: PlacedOrder[] = [];
+  // Track cumulative committed capital to avoid over-committing beyond total budget
+  let committedUsdc = 0;
+  const expiration = getEndOfDayUtc();
 
   for (const market of markets) {
+    // Ensure market exists in DB (FK constraint: orders.condition_id → markets.condition_id)
+    db.upsertMarket({
+      condition_id: market.conditionId,
+      question: market.question,
+      token_id_yes: market.tokenIdYes,
+      token_id_no: market.tokenIdNo,
+      tick_size: market.tickSize,
+      neg_risk: market.negRisk ? 1 : 0,
+      midpoint: market.midpoint,
+      tvl: market.tvl,
+      reward_rate: market.rewardRate,
+    });
+
     // Get per-market budget (from allocation or equal split)
     const marketBudget = allocationMap.get(market.conditionId) ?? (defaultPerSide * 2);
     const perSideUsdc = marketBudget / 2;
@@ -109,15 +125,20 @@ export async function placeOrdersForMarkets(
 
     const effectiveMinSize = minSizeOverride ?? market.minSize;
 
-    // BID side: buy YES token below midpoint
+    // BID side: BUY YES below midpoint — costs price × size USDC
     const bidSize = sharesToBuy(perSideUsdc, prices.bidPrice);
+    const bidCost = prices.bidPrice * bidSize;
+
     if (bidSize < effectiveMinSize) {
       console.log(
         `  Skip BID: ${bidSize.toFixed(2)} shares < min ${effectiveMinSize} ` +
         `($${perSideUsdc.toFixed(2)} @ ${prices.bidPrice.toFixed(2)})`,
       );
-    }
-    if (bidSize >= effectiveMinSize) {
+    } else if (committedUsdc + bidCost > totalBudgetUsdc) {
+      console.log(
+        `  Skip BID: would exceed budget ($${committedUsdc.toFixed(2)} + $${bidCost.toFixed(2)} > $${totalBudgetUsdc})`,
+      );
+    } else {
       try {
         const orderId = await placeSingleOrder(
           clobClient,
@@ -129,14 +150,7 @@ export async function placeOrdersForMarkets(
           market.negRisk,
         );
 
-        const order: PlacedOrder = {
-          orderId,
-          conditionId: market.conditionId,
-          tokenId: prices.bidTokenId,
-          side: "BUY",
-          price: prices.bidPrice,
-          size: bidSize,
-        };
+        committedUsdc += bidCost;
 
         db.insertOrder({
           order_id: orderId,
@@ -147,24 +161,41 @@ export async function placeOrdersForMarkets(
           size: bidSize,
           order_type: "GTD",
           status: "LIVE",
-          expiry: getEndOfDayUtc(),
+          expiry: expiration,
         });
 
-        placedOrders.push(order);
+        placedOrders.push({
+          orderId,
+          conditionId: market.conditionId,
+          tokenId: prices.bidTokenId,
+          side: "BUY",
+          price: prices.bidPrice,
+          size: bidSize,
+        });
       } catch (err) {
-        console.error(`Failed to place BID for ${market.question}:`, err);
+        const msg = (err as Error).message || String(err);
+        console.error(
+          `  Failed BID ${market.question.slice(0, 40)}: ` +
+          `${bidSize.toFixed(1)} shares @ ${prices.bidPrice.toFixed(2)} ` +
+          `(cost $${bidCost.toFixed(2)}, committed $${committedUsdc.toFixed(2)}): ${msg}`,
+        );
       }
     }
 
-    // ASK side: sell YES token above midpoint
+    // ASK side: SELL YES above midpoint — costs (1 - price) × size USDC as collateral
     const askSize = sharesToBuy(perSideUsdc, 1 - prices.askPrice);
+    const askCost = (1 - prices.askPrice) * askSize;
+
     if (askSize < effectiveMinSize) {
       console.log(
         `  Skip ASK: ${askSize.toFixed(2)} shares < min ${effectiveMinSize} ` +
         `($${perSideUsdc.toFixed(2)} @ ${prices.askPrice.toFixed(2)})`,
       );
-    }
-    if (askSize >= effectiveMinSize) {
+    } else if (committedUsdc + askCost > totalBudgetUsdc) {
+      console.log(
+        `  Skip ASK: would exceed budget ($${committedUsdc.toFixed(2)} + $${askCost.toFixed(2)} > $${totalBudgetUsdc})`,
+      );
+    } else {
       try {
         const orderId = await placeSingleOrder(
           clobClient,
@@ -176,14 +207,7 @@ export async function placeOrdersForMarkets(
           market.negRisk,
         );
 
-        const order: PlacedOrder = {
-          orderId,
-          conditionId: market.conditionId,
-          tokenId: prices.askTokenId,
-          side: "SELL",
-          price: prices.askPrice,
-          size: askSize,
-        };
+        committedUsdc += askCost;
 
         db.insertOrder({
           order_id: orderId,
@@ -194,14 +218,30 @@ export async function placeOrdersForMarkets(
           size: askSize,
           order_type: "GTD",
           status: "LIVE",
-          expiry: getEndOfDayUtc(),
+          expiry: expiration,
         });
 
-        placedOrders.push(order);
+        placedOrders.push({
+          orderId,
+          conditionId: market.conditionId,
+          tokenId: prices.askTokenId,
+          side: "SELL",
+          price: prices.askPrice,
+          size: askSize,
+        });
       } catch (err) {
-        console.error(`Failed to place ASK for ${market.question}:`, err);
+        const msg = (err as Error).message || String(err);
+        console.error(
+          `  Failed ASK ${market.question.slice(0, 40)}: ` +
+          `${askSize.toFixed(1)} shares @ ${prices.askPrice.toFixed(2)} ` +
+          `(cost $${askCost.toFixed(2)}, committed $${committedUsdc.toFixed(2)}): ${msg}`,
+        );
       }
     }
+  }
+
+  if (placedOrders.length > 0) {
+    console.log(`  Total committed: $${committedUsdc.toFixed(2)} / $${totalBudgetUsdc} USDC`);
   }
 
   return placedOrders;

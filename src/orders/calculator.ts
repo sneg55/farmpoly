@@ -31,18 +31,22 @@ function roundToTick(price: number, tickSize: number, direction: "floor" | "ceil
  * For a "zero-fill" strategy, we want orders far enough from midpoint
  * to be unlikely to fill, but close enough to earn liquidity rewards.
  *
+ * Both sides operate on the YES token:
+ *   BID = BUY YES below midpoint
+ *   ASK = SELL YES above midpoint
+ *
  * @param midpoint - Current market midpoint (0-1)
  * @param spreadCents - Distance from midpoint in cents (e.g., 5 = $0.05)
  * @param tickSize - Market tick size string (e.g., "0.01")
- * @param tokenIdYes - Yes token ID (used for BUY/BID)
- * @param tokenIdNo - No token ID (used for SELL/ASK)
+ * @param tokenIdYes - Yes token ID (used for both BID and ASK sides)
+ * @param tokenIdNo - No token ID (currently unused — kept for future two-token strategies)
  */
 export function calculateSafePrices(
   midpoint: number,
   spreadCents: number,
   tickSize: string,
   tokenIdYes: string,
-  tokenIdNo: string,
+  _tokenIdNo: string,
 ): SafePrices | null {
   const tick = TICK_SIZES[tickSize];
   if (!tick) throw new Error(`Invalid tick size: ${tickSize}`);
@@ -67,7 +71,7 @@ export function calculateSafePrices(
     bidPrice,
     askPrice,
     bidTokenId: tokenIdYes,
-    askTokenId: tokenIdYes,
+    askTokenId: tokenIdYes, // SELL YES above midpoint (equivalent to BUY NO)
   };
 }
 

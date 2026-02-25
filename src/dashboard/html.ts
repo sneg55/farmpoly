@@ -206,9 +206,16 @@ async function refresh(){
     const r=await fetch('/api/status');
     const d=await r.json();
     const s=d.session;
-    const dotClass=s?('dot-'+s.status.toLowerCase()):'dot-none';
-    document.getElementById('s-status').innerHTML=
-      '<span class="status-dot '+dotClass+'"></span>'+(s?s.status:'NO SESSION');
+    const VALID_STATUSES=['RUNNING','STOPPED','PANIC'];
+    const statusText=s&&VALID_STATUSES.includes(s.status)?s.status:'NO SESSION';
+    const dotClass=s&&VALID_STATUSES.includes(s.status)?('dot-'+s.status.toLowerCase()):'dot-none';
+    const sEl=document.getElementById('s-status');
+    const dot=sEl.querySelector('.status-dot')||document.createElement('span');
+    dot.className='status-dot '+dotClass;
+    if(!sEl.querySelector('.status-dot'))sEl.prepend(dot);
+    const txt=sEl.querySelector('.status-text')||document.createElement('span');
+    txt.className='status-text';txt.textContent=statusText;
+    if(!sEl.querySelector('.status-text'))sEl.appendChild(txt);
     document.getElementById('s-budget').textContent=s?('$'+fmt(s.budget_usdc)):'--';
     document.getElementById('s-spread').textContent=s?(s.spread_cents+'c spread'):'';
     document.getElementById('s-placed').textContent=s?s.orders_placed:'0';

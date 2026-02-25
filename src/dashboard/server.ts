@@ -7,6 +7,8 @@ export interface DashboardOptions {
   host?: string;
   db: PolyfarmDb;
   onPanic?: () => Promise<number>;
+  /** Bearer token for API authentication. If set, all state-changing endpoints require it. */
+  authToken?: string;
 }
 
 function json(res: http.ServerResponse, data: unknown, status = 200) {
@@ -25,25 +27,52 @@ function freshPayload(db: PolyfarmDb): string {
 }
 
 export function createDashboardServer(opts: DashboardOptions): http.Server {
-  const { db, onPanic } = opts;
+  const { db, onPanic, authToken } = opts;
   const html = dashboardHtml();
+
+  /** Security headers applied to all responses */
+  const SECURITY_HEADERS: Record<string, string> = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+  };
+
+  function setSecurityHeaders(res: http.ServerResponse): void {
+    for (const [key, val] of Object.entries(SECURITY_HEADERS)) {
+      res.setHeader(key, val);
+    }
+  }
+
+  /** Check bearer token auth for state-changing endpoints */
+  function isAuthorized(req: http.IncomingMessage): boolean {
+    if (!authToken) return true; // No token configured = open (localhost-only use)
+    const header = req.headers.authorization;
+    return header === `Bearer ${authToken}`;
+  }
 
   // Shared SSE publisher — one interval with cached snapshot, fan-out to all clients
   const sseClients = new Set<http.ServerResponse>();
   let sseCache = "";
+  let sseErrors = 0;
   const sseInterval = setInterval(() => {
     if (sseClients.size === 0) return;
     try {
       sseCache = freshPayload(db);
+      sseErrors = 0;
       for (const client of sseClients) {
         client.write(`data: ${sseCache}\n\n`);
       }
-    } catch {
-      // DB error, skip this tick
+    } catch (err) {
+      sseErrors++;
+      if (sseErrors <= 3) {
+        console.error(`[dashboard] SSE payload error (${sseErrors}):`, (err as Error).message);
+      }
     }
   }, SSE_INTERVAL_MS);
 
   const server = http.createServer(async (req, res) => {
+    setSecurityHeaders(res);
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
     try {
@@ -60,6 +89,10 @@ export function createDashboardServer(opts: DashboardOptions): http.Server {
       }
 
       if (url.pathname === "/api/panic" && req.method === "POST") {
+        if (!isAuthorized(req)) {
+          json(res, { error: "Unauthorized" }, 401);
+          return;
+        }
         if (onPanic) {
           const cancelled = await onPanic();
           json(res, { ok: true, cancelled });

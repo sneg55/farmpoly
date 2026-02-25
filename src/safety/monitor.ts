@@ -22,8 +22,10 @@ const SLOW_CANCEL_THRESHOLD_MS = 200;
 export class SafetyMonitor extends EventEmitter {
   private midpoints = new Map<string, MidpointState>();
   private lastCancelTime = new Map<string, number>();
-  /** In-memory order index: tokenId -> OrderRow[] (avoids DB query per tick) */
-  private ordersByToken = new Map<string, OrderRow[]>();
+  /** In-memory order index: tokenId -> Map<orderId, OrderRow> (O(1) lookup/delete) */
+  private ordersByToken = new Map<string, Map<string, OrderRow>>();
+  /** Per-asset single-flight lock to prevent overlapping checkOrders calls */
+  private checkingAsset = new Set<string>();
   private running = false;
 
   private readonly dangerZoneCents: number;
@@ -71,7 +73,7 @@ export class SafetyMonitor extends EventEmitter {
     return this.midpoints.get(assetId)?.midpoint;
   }
 
-  /** Rebuild in-memory order index from DB (call after placing new orders) */
+  /** Rebuild in-memory order index from DB (call after placing new orders or rebalance) */
   rebuildOrderIndex(): void {
     this.ordersByToken.clear();
     for (const order of this.db.getLiveOrders()) {
@@ -83,19 +85,18 @@ export class SafetyMonitor extends EventEmitter {
   addOrderToIndex(order: OrderRow): void {
     let orders = this.ordersByToken.get(order.token_id);
     if (!orders) {
-      orders = [];
+      orders = new Map();
       this.ordersByToken.set(order.token_id, orders);
     }
-    orders.push(order);
+    orders.set(order.order_id, order);
   }
 
-  /** Remove an order from the in-memory index */
+  /** Remove an order from the in-memory index (O(1)) */
   private removeOrderFromIndex(orderId: string, tokenId: string): void {
     const orders = this.ordersByToken.get(tokenId);
     if (!orders) return;
-    const idx = orders.findIndex((o) => o.order_id === orderId);
-    if (idx !== -1) orders.splice(idx, 1);
-    if (orders.length === 0) this.ordersByToken.delete(tokenId);
+    orders.delete(orderId);
+    if (orders.size === 0) this.ordersByToken.delete(tokenId);
   }
 
   private onBookUpdate(event: BookEvent): void {
@@ -113,13 +114,20 @@ export class SafetyMonitor extends EventEmitter {
 
     this.emit("midpoint", { assetId: event.asset_id, midpoint });
 
-    this.checkOrders(event.asset_id, midpoint, startTime);
+    // Single-flight: drop event if we're already processing this asset
+    if (this.checkingAsset.has(event.asset_id)) return;
+
+    this.checkingAsset.add(event.asset_id);
+    this.checkOrders(event.asset_id, midpoint, startTime).finally(() => {
+      this.checkingAsset.delete(event.asset_id);
+    });
   }
 
   private async checkOrders(assetId: string, midpoint: number, startTime: number): Promise<void> {
     // O(1) lookup from in-memory index instead of full DB scan
-    const liveOrders = this.ordersByToken.get(assetId);
-    if (!liveOrders || liveOrders.length === 0) return;
+    const orderMap = this.ordersByToken.get(assetId);
+    if (!orderMap || orderMap.size === 0) return;
+    const liveOrders = Array.from(orderMap.values());
 
     const dangerousOrders: OrderRow[] = [];
     for (const order of liveOrders) {

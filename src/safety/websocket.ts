@@ -76,8 +76,8 @@ export class WsConnectionManager extends EventEmitter {
         } else {
           this.handleEvent(parsed);
         }
-      } catch {
-        // Ignore malformed messages
+      } catch (err) {
+        this.emit("parse_error", { error: err, size: data.toString().length });
       }
     });
 
@@ -150,11 +150,19 @@ export class WsConnectionManager extends EventEmitter {
   }
 
   private isValidBookEvent(event: Record<string, unknown>): boolean {
-    return (
-      typeof event.asset_id === "string" &&
-      Array.isArray(event.bids) &&
-      Array.isArray(event.asks)
-    );
+    if (typeof event.asset_id !== "string" || !Array.isArray(event.bids) || !Array.isArray(event.asks)) {
+      return false;
+    }
+    // Validate bid/ask entries have numeric price strings
+    const validEntry = (e: unknown): boolean => {
+      if (typeof e !== "object" || e === null) return false;
+      const entry = e as Record<string, unknown>;
+      return typeof entry.price === "string" && !isNaN(Number(entry.price));
+    };
+    // Only need to validate first entry of each side (performance)
+    if (event.bids.length > 0 && !validEntry(event.bids[0])) return false;
+    if (event.asks.length > 0 && !validEntry(event.asks[0])) return false;
+    return true;
   }
 
   private startHeartbeat(): void {

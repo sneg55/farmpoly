@@ -12,6 +12,7 @@ import {
   type AllocationResult,
 } from "../../discovery/rewards.js";
 import { placeOrdersForMarkets } from "../../orders/placer.js";
+import { cancelAllOrders, panicCancelAll, gracefulShutdown } from "../../orders/lifecycle.js";
 import { WsConnectionManager } from "../../safety/websocket.js";
 import { SafetyMonitor } from "../../safety/monitor.js";
 import type { ClobClient } from "@polymarket/clob-client";
@@ -170,8 +171,7 @@ export const runCommand = new Command("run")
         // Cancel all existing orders
         console.log("  Cancelling existing orders...");
         try {
-          await auth.clobClient.cancelAll();
-          db.cancelAllOrders();
+          await cancelAllOrders(auth.clobClient, db);
           console.log(chalk.green("  Orders cancelled."));
         } catch (err) {
           console.error(chalk.red("  Failed to cancel orders:"), err);
@@ -191,8 +191,9 @@ export const runCommand = new Command("run")
         const orderCount = await deployCapital(markets, allocations);
         currentMarkets = markets;
 
-        // Update monitor subscriptions
+        // Update monitor subscriptions and rebuild order index
         if (monitor) {
+          monitor.rebuildOrderIndex();
           const subscribedTokens = new Set<string>();
           for (const market of markets) {
             if (!subscribedTokens.has(market.tokenIdYes)) {
@@ -254,7 +255,7 @@ export const runCommand = new Command("run")
       console.log(chalk.green(`Placed ${placedCount} orders across ${targetMarkets.length} markets\n`));
       db.updateSessionStats(sessionId, { orders_placed: placedCount });
 
-      // Start safety monitor
+      // Start safety monitor (rebuildOrderIndex is called automatically in start())
       console.log(chalk.bold("\nStarting safety monitor..."));
       const wsManager = new WsConnectionManager();
       monitor = new SafetyMonitor(auth.clobClient, db, wsManager, {
@@ -288,12 +289,7 @@ export const runCommand = new Command("run")
         console.log(
           chalk.red(`CANCELLED: ${orderId.slice(0, 8)}... (${latencyMs}ms)`),
         );
-        const session = db.getActiveSession();
-        if (session) {
-          db.updateSessionStats(session.id, {
-            orders_cancelled: (session.orders_cancelled || 0) + 1,
-          });
-        }
+        db.incrementCancelled(sessionId);
       });
 
       monitor.on("slow_cancel", ({ orderId, latencyMs }) => {
@@ -306,32 +302,37 @@ export const runCommand = new Command("run")
         console.log(chalk.red.bold(`\nPANIC: ${err.message}`));
         console.log("Cancelling all orders...");
         try {
-          await auth.clobClient.cancelAll();
-          db.cancelAllOrders();
+          await panicCancelAll(auth.clobClient, db, sessionId);
           console.log(chalk.green("All orders cancelled via API"));
         } catch (cancelErr) {
           console.error(chalk.red("Failed to cancel orders!"), cancelErr);
         }
-        db.endSession(sessionId, "PANIC");
         process.exit(1);
       });
 
       monitor.start();
       console.log(chalk.green("Safety monitor active. Press Ctrl+C to stop.\n"));
 
-      // Heartbeat loop (keep orders alive)
+      // Heartbeat loop (keep orders alive — server timeout is 10s)
       let heartbeatFailures = 0;
       let heartbeatId: string | null = null;
       const MAX_HEARTBEAT_FAILURES = 5;
-      const HEARTBEAT_INTERVAL_MS = 8000;
+      const HEARTBEAT_INTERVAL_MS = 5000; // 5s for safety margin against 10s server timeout
       const heartbeatInterval = setInterval(async () => {
         try {
           const response = await auth.clobClient.postHeartbeat(heartbeatId);
-          heartbeatId = response.heartbeat_id;
+          heartbeatId = response.heartbeat_id ?? null;
           heartbeatFailures = 0;
         } catch (err) {
+          const errMsg = (err as Error).message || String(err);
+          // "Invalid Heartbeat ID" means our chain expired — start fresh, don't count as failure
+          if (errMsg.includes("Invalid Heartbeat ID") || errMsg.includes("invalid heartbeat")) {
+            console.log(chalk.dim("Heartbeat chain expired, starting fresh..."));
+            heartbeatId = null;
+            return;
+          }
           heartbeatFailures++;
-          console.log(chalk.yellow(`Heartbeat failed (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${(err as Error).message}`));
+          console.log(chalk.yellow(`Heartbeat failed (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${errMsg}`));
           if (heartbeatFailures >= MAX_HEARTBEAT_FAILURES) {
             console.log(chalk.red.bold("Too many heartbeat failures, triggering panic..."));
             monitor?.emit("panic", new Error("Heartbeat failed repeatedly"));
@@ -362,14 +363,12 @@ export const runCommand = new Command("run")
 
         console.log("Cancelling all live orders...");
         try {
-          await auth.clobClient.cancelAll();
-          db.cancelAllOrders();
+          await gracefulShutdown(auth.clobClient, db, sessionId);
           console.log(chalk.green("All orders cancelled."));
         } catch (err) {
           console.error(chalk.red("Warning: Failed to cancel some orders"), err);
         }
 
-        db.endSession(sessionId, "STOPPED");
         rawDb?.close();
         console.log(chalk.bold.green("PolyFarm stopped."));
         process.exit(0);
