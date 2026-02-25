@@ -48,3 +48,11 @@ export const CTF_MERGE_ABI = [
 export const NEG_RISK_MERGE_ABI = [
   "function mergePositions(bytes32 conditionId, uint256 amount)",
 ];
+
+export const CTF_SPLIT_ABI = [
+  "function splitPosition(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)",
+];
+
+export const NEG_RISK_SPLIT_ABI = [
+  "function splitPosition(bytes32 conditionId, uint256 amount)",
+];

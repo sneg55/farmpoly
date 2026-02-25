@@ -65,9 +65,23 @@ CREATE TABLE IF NOT EXISTS hedges (
   completed_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS inventory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  condition_id TEXT NOT NULL,
+  token_id TEXT NOT NULL,
+  side TEXT NOT NULL CHECK(side IN ('YES', 'NO')),
+  minted_amount REAL NOT NULL,
+  current_balance REAL NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(session_id, condition_id, side)
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_recent ON orders(status, cancelled_at DESC, placed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hedges_status ON hedges(status);
 CREATE INDEX IF NOT EXISTS idx_hedges_created_at ON hedges(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inventory_session ON inventory(session_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_condition ON inventory(condition_id);

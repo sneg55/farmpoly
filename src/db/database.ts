@@ -63,6 +63,17 @@ export interface HedgeRow {
   completed_at: number | null;
 }
 
+export interface InventoryRow {
+  id: number;
+  session_id: number;
+  condition_id: string;
+  token_id: string;
+  side: "YES" | "NO";
+  minted_amount: number;
+  current_balance: number;
+  updated_at: number;
+}
+
 export interface SessionRow {
   id: number;
   started_at: number;
@@ -145,6 +156,23 @@ export class PolyfarmDb {
       ),
       getRecentHedges: db.prepare(
         "SELECT * FROM hedges ORDER BY created_at DESC LIMIT ?",
+      ),
+      upsertInventory: db.prepare(
+        `INSERT INTO inventory (session_id, condition_id, token_id, side, minted_amount, current_balance)
+         VALUES (@session_id, @condition_id, @token_id, @side, @minted_amount, @current_balance)
+         ON CONFLICT(session_id, condition_id, side) DO UPDATE SET
+           minted_amount = minted_amount + excluded.minted_amount,
+           current_balance = current_balance + excluded.current_balance,
+           updated_at = unixepoch()`,
+      ),
+      getInventory: db.prepare(
+        "SELECT * FROM inventory WHERE session_id=? AND condition_id=? AND side=?",
+      ),
+      updateInventoryBalance: db.prepare(
+        "UPDATE inventory SET current_balance=?, updated_at=unixepoch() WHERE id=?",
+      ),
+      getSessionInventory: db.prepare(
+        "SELECT * FROM inventory WHERE session_id=? AND current_balance > 0",
       ),
     };
   }
@@ -255,6 +283,30 @@ export class PolyfarmDb {
 
   getRecentHedges(limit: number = 50): HedgeRow[] {
     return this.stmts.getRecentHedges.all(limit) as HedgeRow[];
+  }
+
+  // Inventory
+  upsertInventory(inventory: {
+    session_id: number;
+    condition_id: string;
+    token_id: string;
+    side: "YES" | "NO";
+    minted_amount: number;
+    current_balance: number;
+  }): void {
+    this.stmts.upsertInventory.run(inventory);
+  }
+
+  getInventory(sessionId: number, conditionId: string, side: "YES" | "NO"): InventoryRow | undefined {
+    return this.stmts.getInventory.get(sessionId, conditionId, side) as InventoryRow | undefined;
+  }
+
+  updateInventoryBalance(id: number, balance: number): void {
+    this.stmts.updateInventoryBalance.run(balance, id);
+  }
+
+  getSessionInventory(sessionId: number): InventoryRow[] {
+    return this.stmts.getSessionInventory.all(sessionId) as InventoryRow[];
   }
 
   getActiveSession(): SessionRow | undefined {

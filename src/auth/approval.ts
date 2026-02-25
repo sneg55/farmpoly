@@ -17,8 +17,12 @@ export interface ApprovalStatus {
   balance: BigNumber;
   ctfExchangeAllowance: BigNumber;
   negRiskCtfExchangeAllowance: BigNumber;
+  conditionalTokensAllowance: BigNumber;
+  negRiskAdapterAllowance: BigNumber;
   needsApproval: boolean;
   needsNegRiskApproval: boolean;
+  needsConditionalTokensApproval: boolean;
+  needsNegRiskAdapterApproval: boolean;
 }
 
 export async function checkApproval(wallet: Wallet, env: EnvConfig): Promise<ApprovalStatus> {
@@ -26,31 +30,47 @@ export async function checkApproval(wallet: Wallet, env: EnvConfig): Promise<App
   const signer = wallet.connect(provider);
   const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, signer);
 
-  const [balance, ctfAllowance, negRiskAllowance] = await Promise.all([
+  const [balance, ctfAllowance, negRiskAllowance, ctAllowance, adapterAllowance] = await Promise.all([
     usdc.balanceOf(wallet.address) as Promise<BigNumber>,
     usdc.allowance(wallet.address, CTF_EXCHANGE) as Promise<BigNumber>,
     usdc.allowance(wallet.address, NEG_RISK_CTF_EXCHANGE) as Promise<BigNumber>,
+    usdc.allowance(wallet.address, CONDITIONAL_TOKENS) as Promise<BigNumber>,
+    usdc.allowance(wallet.address, NEG_RISK_ADAPTER) as Promise<BigNumber>,
   ]);
 
   return {
     balance,
     ctfExchangeAllowance: ctfAllowance,
     negRiskCtfExchangeAllowance: negRiskAllowance,
+    conditionalTokensAllowance: ctAllowance,
+    negRiskAdapterAllowance: adapterAllowance,
     needsApproval: ctfAllowance.isZero(),
     needsNegRiskApproval: negRiskAllowance.isZero(),
+    needsConditionalTokensApproval: ctAllowance.isZero(),
+    needsNegRiskAdapterApproval: adapterAllowance.isZero(),
   };
 }
 
 export async function approveUSDC(
   wallet: Wallet,
   env: EnvConfig,
-): Promise<{ ctfTxHash?: string; negRiskTxHash?: string }> {
+): Promise<{
+  ctfTxHash?: string;
+  negRiskTxHash?: string;
+  conditionalTokensTxHash?: string;
+  negRiskAdapterTxHash?: string;
+}> {
   const provider = new ethers.providers.JsonRpcProvider(env.polygonRpcUrl);
   const signer = wallet.connect(provider);
   const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, signer);
 
   const status = await checkApproval(wallet, env);
-  const result: { ctfTxHash?: string; negRiskTxHash?: string } = {};
+  const result: {
+    ctfTxHash?: string;
+    negRiskTxHash?: string;
+    conditionalTokensTxHash?: string;
+    negRiskAdapterTxHash?: string;
+  } = {};
 
   if (status.needsApproval) {
     const tx = await usdc.approve(CTF_EXCHANGE, MAX_UINT256);
@@ -62,6 +82,18 @@ export async function approveUSDC(
     const tx = await usdc.approve(NEG_RISK_CTF_EXCHANGE, MAX_UINT256);
     await tx.wait();
     result.negRiskTxHash = tx.hash;
+  }
+
+  if (status.needsConditionalTokensApproval) {
+    const tx = await usdc.approve(CONDITIONAL_TOKENS, MAX_UINT256);
+    await tx.wait();
+    result.conditionalTokensTxHash = tx.hash;
+  }
+
+  if (status.needsNegRiskAdapterApproval) {
+    const tx = await usdc.approve(NEG_RISK_ADAPTER, MAX_UINT256);
+    await tx.wait();
+    result.negRiskAdapterTxHash = tx.hash;
   }
 
   return result;

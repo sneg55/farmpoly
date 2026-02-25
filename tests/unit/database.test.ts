@@ -212,6 +212,99 @@ describe("PolyfarmDb", () => {
     });
   });
 
+  describe("inventory", () => {
+    it("upserts and retrieves inventory", () => {
+      const sessionId = db.startSession(100, 2);
+      db.upsertInventory({
+        session_id: sessionId,
+        condition_id: "cond1",
+        token_id: "tok_no_1",
+        side: "NO",
+        minted_amount: 50,
+        current_balance: 50,
+      });
+
+      const inv = db.getInventory(sessionId, "cond1", "NO");
+      expect(inv).toBeDefined();
+      expect(inv!.minted_amount).toBe(50);
+      expect(inv!.current_balance).toBe(50);
+      expect(inv!.side).toBe("NO");
+    });
+
+    it("accumulates on upsert (same session + condition + side)", () => {
+      const sessionId = db.startSession(100, 2);
+      db.upsertInventory({
+        session_id: sessionId,
+        condition_id: "cond1",
+        token_id: "tok_no_1",
+        side: "NO",
+        minted_amount: 30,
+        current_balance: 30,
+      });
+      db.upsertInventory({
+        session_id: sessionId,
+        condition_id: "cond1",
+        token_id: "tok_no_1",
+        side: "NO",
+        minted_amount: 20,
+        current_balance: 20,
+      });
+
+      const inv = db.getInventory(sessionId, "cond1", "NO");
+      expect(inv!.minted_amount).toBe(50); // 30 + 20
+      expect(inv!.current_balance).toBe(50); // 30 + 20
+    });
+
+    it("updates inventory balance", () => {
+      const sessionId = db.startSession(100, 2);
+      db.upsertInventory({
+        session_id: sessionId,
+        condition_id: "cond1",
+        token_id: "tok_no_1",
+        side: "NO",
+        minted_amount: 50,
+        current_balance: 50,
+      });
+
+      const inv = db.getInventory(sessionId, "cond1", "NO")!;
+      db.updateInventoryBalance(inv.id, 25);
+
+      const updated = db.getInventory(sessionId, "cond1", "NO")!;
+      expect(updated.current_balance).toBe(25);
+      expect(updated.minted_amount).toBe(50); // unchanged
+    });
+
+    it("getSessionInventory returns only non-zero balances", () => {
+      const sessionId = db.startSession(100, 2);
+      db.upsertInventory({
+        session_id: sessionId,
+        condition_id: "cond1",
+        token_id: "tok_no_1",
+        side: "NO",
+        minted_amount: 50,
+        current_balance: 50,
+      });
+      db.upsertInventory({
+        session_id: sessionId,
+        condition_id: "cond2",
+        token_id: "tok_no_2",
+        side: "NO",
+        minted_amount: 30,
+        current_balance: 0, // fully consumed
+      });
+
+      const inventory = db.getSessionInventory(sessionId);
+      expect(inventory).toHaveLength(1);
+      expect(inventory[0].condition_id).toBe("cond1");
+    });
+
+    it("returns undefined for non-existent inventory", () => {
+      const sessionId = db.startSession(100, 2);
+      const inv = db.getInventory(sessionId, "nonexistent", "NO");
+      expect(inv).toBeUndefined();
+    });
+  });
+
   describe("config", () => {
     it("sets and gets config values", () => {
       db.setConfig("api_key", "test_key");

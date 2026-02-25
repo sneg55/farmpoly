@@ -3,12 +3,15 @@ import { Side, OrderType } from "@polymarket/clob-client";
 import type { Wallet } from "ethers";
 import { ethers } from "ethers";
 import type { EnvConfig } from "../utils/config.js";
+import type { PolyfarmDb } from "../db/database.js";
 import type { FillEvent } from "./detector.js";
 import { getTokenBalances } from "../positions/fetcher.js";
 import { mergePositions } from "./merger.js";
 
 export interface HedgeOptions {
   maxHedgeCostCents: number; // Max extra cents for hedge buy (default: 5)
+  db?: PolyfarmDb;           // Database for inventory lookups
+  sessionId?: number;        // Active session ID for inventory
 }
 
 export type HedgeStatus = "HEDGED" | "HEDGE_FAILED" | "MERGE_FAILED" | "SKIPPED";
@@ -42,6 +45,91 @@ export async function executeHedge(
   fill: FillEvent,
   options: HedgeOptions = { maxHedgeCostCents: 5 },
 ): Promise<HedgeResult> {
+  // --- Inventory merge path ---
+  // On BID fill (bought YES): check if we have NO tokens from minting
+  // If so, merge directly — no hedge buy needed (pure spread profit!)
+  if (fill.side === "BUY" && options.db && options.sessionId != null) {
+    const noInventory = options.db.getInventory(options.sessionId, fill.conditionId, "NO");
+    if (noInventory && noInventory.current_balance > 0) {
+      const mergeableFromInventory = Math.min(noInventory.current_balance, fill.filledSize);
+
+      if (mergeableFromInventory > 0) {
+        console.log(`  Inventory merge: ${mergeableFromInventory.toFixed(2)} tokens from minted NO inventory`);
+
+        // Wait for on-chain settlement of the fill
+        await new Promise((r) => setTimeout(r, 2000));
+
+        // Check on-chain balances
+        const balances = await getTokenBalances(wallet, env, [fill.tokenIdYes, fill.tokenIdNo]);
+        const balMap = new Map<string, ethers.BigNumber>();
+        for (const b of balances) {
+          balMap.set(b.tokenId, b.balance);
+        }
+        const balYes = balMap.get(fill.tokenIdYes) ?? ethers.BigNumber.from(0);
+        const balNo = balMap.get(fill.tokenIdNo) ?? ethers.BigNumber.from(0);
+        const mergeAmount = balYes.lt(balNo) ? balYes : balNo;
+
+        if (!mergeAmount.isZero()) {
+          try {
+            const mergeTxHash = await mergePositions(
+              wallet, env, fill.conditionId, fill.negRisk, mergeAmount,
+            );
+
+            const mergeAmountNum = Number(ethers.utils.formatUnits(mergeAmount, 6));
+
+            // Update inventory balance
+            const newBalance = noInventory.current_balance - mergeAmountNum;
+            options.db.updateInventoryBalance(noInventory.id, Math.max(0, newBalance));
+
+            // P&L: spread profit (no hedge cost!)
+            const pnlCents = Math.round(fill.filledPrice * 100 * mergeAmountNum) / mergeAmountNum;
+            // More accurately: each merged pair returns $1 USDC.
+            // We paid (1 - askPrice) via split to get NO + YES. Sold YES at askPrice.
+            // On BID fill, bought YES at bidPrice. Merge YES+NO = $1.
+            // Profit = 1 - bidPrice - (1 - askPrice) = askPrice - bidPrice = spread
+            const spreadPnlCents = mergeAmountNum * (1.0 - fill.filledPrice) * 100 - mergeAmountNum * (1.0 - 1.0) * 100;
+            // Simplified: pnl = (1 - fillPrice) * 100 = complement price * 100 per unit ...
+            // Actually with inventory: we paid $1 to split (got YES+NO), sold YES at askPrice,
+            // then BID fills at bidPrice giving us more YES. We merge the filled YES with minted NO.
+            // Net: received askPrice (from ASK sell) + 1.00 (from merge) - 1.00 (split cost) - bidPrice (BID cost)
+            //     = askPrice - bidPrice = spread
+            // For now just calculate based on the actual merged amount recovering $1 vs what was paid
+            const inventoryPnlCents = Math.round((1.0 - fill.filledPrice) * mergeAmountNum * 100 * 100) / 100;
+
+            // If we fully covered the fill from inventory, we're done
+            if (mergeAmountNum >= fill.filledSize) {
+              return {
+                status: "HEDGED",
+                hedgeOrderId: null,
+                hedgePrice: null,
+                hedgeSize: 0,
+                mergeAmount: mergeAmountNum,
+                mergeTxHash,
+                pnlCents: inventoryPnlCents,
+              };
+            }
+
+            // Partial coverage: hedge the remainder via normal path below
+            // (Fall through with reduced hedge size)
+          } catch (mergeErr) {
+            console.log(`  Inventory merge failed, falling back to hedge buy: ${(mergeErr as Error).message?.slice(0, 80)}`);
+          }
+        }
+      }
+    }
+  }
+
+  // On ASK fill (sold YES): NO tokens remain as directional position
+  if (fill.side === "SELL" && options.db && options.sessionId != null) {
+    const noInventory = options.db.getInventory(options.sessionId, fill.conditionId, "NO");
+    if (noInventory && noInventory.current_balance > 0) {
+      console.log(
+        `  ASK filled: holding ${noInventory.current_balance.toFixed(2)} NO tokens as directional position ` +
+        `(will merge when BID fills or on shutdown)`,
+      );
+    }
+  }
+
   // Determine hedge direction
   // BID fill (bought YES) → buy NO token
   // ASK fill (sold YES, holds NO) → buy YES token

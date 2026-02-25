@@ -39,20 +39,25 @@ export const initCommand = new Command("init")
       const balanceUsdc = Number(status.balance) / 1e6;
       console.log(`  Balance: ${chalk.bold(`$${balanceUsdc.toFixed(2)} USDC`)}`);
 
-      if (status.needsApproval || status.needsNegRiskApproval) {
+      if (status.needsApproval || status.needsNegRiskApproval ||
+          status.needsConditionalTokensApproval || status.needsNegRiskAdapterApproval) {
         if (opts.approve) {
           console.log("  Approving USDC spending...");
           const txs = await approveUSDC(auth.wallet, env);
           if (txs.ctfTxHash) console.log(chalk.green(`  CTF Exchange approved: ${txs.ctfTxHash}`));
           if (txs.negRiskTxHash)
             console.log(chalk.green(`  NegRisk Exchange approved: ${txs.negRiskTxHash}`));
+          if (txs.conditionalTokensTxHash)
+            console.log(chalk.green(`  ConditionalTokens (split) approved: ${txs.conditionalTokensTxHash}`));
+          if (txs.negRiskAdapterTxHash)
+            console.log(chalk.green(`  NegRisk Adapter (split) approved: ${txs.negRiskAdapterTxHash}`));
         } else {
           console.log(
             chalk.yellow("  USDC approval needed. Run with --approve to auto-approve."),
           );
         }
       } else {
-        console.log(chalk.green("  USDC already approved for both exchanges"));
+        console.log(chalk.green("  USDC already approved for all contracts"));
       }
 
       // 5. Check ConditionalTokens ERC1155 approval (required for SELL orders)

@@ -1,10 +1,21 @@
 import type { ClobClient } from "@polymarket/clob-client";
 import { Side, OrderType } from "@polymarket/clob-client";
+import type { Wallet } from "ethers";
+import type { EnvConfig } from "../utils/config.js";
 import type { PolyfarmDb } from "../db/database.js";
 import type { RewardMarket, AllocationResult } from "../discovery/rewards.js";
 import type { TrendDirection } from "../intelligence/trend.js";
 import { allowedSides } from "../intelligence/trend.js";
 import { calculateSafePrices, sharesToBuy, allocateBudget } from "./calculator.js";
+import { splitPosition } from "../positions/splitter.js";
+import { getTokenBalances } from "../positions/fetcher.js";
+
+export interface MintOptions {
+  enabled: boolean;
+  wallet: Wallet;
+  env: EnvConfig;
+  sessionId: number;
+}
 
 export interface PlacedOrder {
   orderId: string;
@@ -78,6 +89,7 @@ export async function placeOrdersForMarkets(
   minSizeOverride?: number,
   allocations?: AllocationResult[],
   trendByMarket?: Map<string, TrendDirection>,
+  mintOptions?: MintOptions,
 ): Promise<PlacedOrder[]> {
   // Build a map of conditionId -> allocated USDC if allocations provided
   const allocationMap = new Map<string, number>();
@@ -210,8 +222,12 @@ export async function placeOrdersForMarkets(
       }
     }
 
-    // ASK side: SELL YES above midpoint — costs (1 - price) × size USDC as collateral
+    // ASK side: SELL YES above midpoint
+    // When minting: cost is the full split amount (locked as collateral)
+    // Without minting: cost is (1 - price) × size USDC (theoretical collateral)
     const askSize = sharesToBuy(perSideUsdc, 1 - prices.askPrice);
+    // With minting, the actual USDC cost of the split is askSize * price_per_token = askSize in USDC units
+    // because splitPosition locks $1 per YES+NO pair. But we only split askCost USDC worth.
     const askCost = (1 - prices.askPrice) * askSize;
 
     if (!sides.ask) {
@@ -227,6 +243,57 @@ export async function placeOrdersForMarkets(
       );
     } else {
       try {
+        // Mint-before-ASK: split USDC into YES+NO tokens if minting is enabled
+        if (mintOptions?.enabled) {
+          // The split amount in USDC = askSize tokens (each YES+NO pair costs $1 USDC)
+          // We need askSize tokens worth of YES to sell. Split costs askSize USDC (6 decimals).
+          // But wait — USDC per share is $1 for a full pair, so askSize shares = askSize USDC to split.
+          // However, the budget check above uses askCost = (1-price)*askSize, which is the collateral
+          // needed without minting. With minting, we lock askSize USDC total but get YES+NO.
+          // The actual cost stays askCost because the NO tokens have value and offset.
+          const splitAmountUsdc = askCost; // Split enough USDC to cover the collateral cost
+          try {
+            // Check on-chain YES balance first
+            const balances = await getTokenBalances(mintOptions.wallet, mintOptions.env, [market.tokenIdYes]);
+            const onChainYes = balances.length > 0 ? Number(balances[0].balance) / 1e6 : 0;
+            const deficit = askSize - onChainYes;
+
+            if (deficit > 0) {
+              console.log(`  Minting: splitting $${deficit.toFixed(2)} USDC → YES+NO tokens`);
+              await splitPosition(
+                mintOptions.wallet,
+                mintOptions.env,
+                market.conditionId,
+                market.negRisk,
+                deficit,
+              );
+
+              // Record NO tokens in inventory
+              db.upsertInventory({
+                session_id: mintOptions.sessionId,
+                condition_id: market.conditionId,
+                token_id: market.tokenIdNo,
+                side: "NO",
+                minted_amount: deficit,
+                current_balance: deficit,
+              });
+              // Record YES tokens too (they'll be consumed by ASK)
+              db.upsertInventory({
+                session_id: mintOptions.sessionId,
+                condition_id: market.conditionId,
+                token_id: market.tokenIdYes,
+                side: "YES",
+                minted_amount: deficit,
+                current_balance: deficit,
+              });
+            }
+          } catch (splitErr) {
+            const msg = (splitErr as Error).message || String(splitErr);
+            console.log(`  Mint failed (falling back to BID-only): ${msg.slice(0, 80)}`);
+            continue; // skip ASK for this market
+          }
+        }
+
         const orderId = await placeSingleOrder(
           clobClient,
           prices.askTokenId,
@@ -259,6 +326,14 @@ export async function placeOrdersForMarkets(
           price: prices.askPrice,
           size: askSize,
         });
+
+        // Update YES inventory balance (tokens are now in the ASK order)
+        if (mintOptions?.enabled) {
+          const yesInv = db.getInventory(mintOptions.sessionId, market.conditionId, "YES");
+          if (yesInv) {
+            db.updateInventoryBalance(yesInv.id, Math.max(0, yesInv.current_balance - askSize));
+          }
+        }
       } catch (err) {
         const msg = (err as Error).message || String(err);
         console.error(

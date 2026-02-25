@@ -12,19 +12,22 @@ import {
   type AllocationResult,
   type FilterStats,
 } from "../../discovery/rewards.js";
-import { placeOrdersForMarkets } from "../../orders/placer.js";
+import { placeOrdersForMarkets, type MintOptions } from "../../orders/placer.js";
 import { cancelAllOrders, panicCancelAll, gracefulShutdown } from "../../orders/lifecycle.js";
 import { WsConnectionManager } from "../../safety/websocket.js";
 import { SafetyMonitor } from "../../safety/monitor.js";
 import { detectTrend, type TrendDirection } from "../../intelligence/trend.js";
 import { FillDetector, type FillEvent } from "../../hedge/detector.js";
 import { executeHedge } from "../../hedge/executor.js";
+import { getTokenBalances } from "../../positions/fetcher.js";
+import { mergePositions } from "../../hedge/merger.js";
+import { ethers } from "ethers";
 import type { ClobClient } from "@polymarket/clob-client";
 
 export const runCommand = new Command("run")
   .description("Start the liquidity farming daemon")
   .requiredOption("--budget <usdc>", "Total USDC budget to deploy")
-  .option("--spread <cents>", "Distance from midpoint in cents", "5")
+  .option("--spread <cents>", "Distance from midpoint in cents", "2")
   .option("--max-markets <n>", "Maximum number of markets", "10")
   .option("--danger-zone <cents>", "Danger zone distance in cents", "3")
   .option("--min-size <shares>", "Override minimum order size (default: from API)")
@@ -39,6 +42,7 @@ export const runCommand = new Command("run")
   .option("--placement-mode <mode>", "adaptive | bid-only | ask-only | both", "adaptive")
   .option("--warmup-seconds <s>", "Collect WS data before placing orders", "5")
   .option("--exit-on-empty", "Exit immediately if no markets found (default: retry with backoff)", false)
+  .option("--no-mint", "Disable token minting (BID-only mode for ASK)", false)
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);
@@ -55,6 +59,7 @@ export const runCommand = new Command("run")
     const placementMode: string = opts.placementMode;
     const warmupSeconds = parseInt(opts.warmupSeconds);
     const exitOnEmpty: boolean = opts.exitOnEmpty === true;
+    const mintEnabled: boolean = opts.mint !== false;
 
     // Mutable filter values — start at user config, relax on sustained failure
     let effectiveMaxVolatility = maxVolatilityCents;
@@ -83,6 +88,7 @@ export const runCommand = new Command("run")
       console.log(`  Danger zone: ${dangerZoneCents}c`);
       console.log(`  Smart allocation: ${useSmartAllocation ? chalk.green("ON") : chalk.yellow("OFF")}`);
       console.log(`  Hedge fills: ${hedgeFills ? chalk.green("ON") : chalk.yellow("OFF")}`);
+      console.log(`  Mint tokens: ${mintEnabled ? chalk.green("ON (two-sided)") : chalk.yellow("OFF (BID-only ASK)")}`);
       console.log(`  Placement mode: ${placementMode}`);
       console.log(`  Max volatility: ${maxVolatilityCents}c`);
       console.log(`  WS warmup: ${warmupSeconds}s`);
@@ -265,12 +271,40 @@ export const runCommand = new Command("run")
       /**
        * Place orders for selected markets with trend-aware one-sided placement
        */
+      /**
+       * Calculate and log estimated reward score per market
+       */
+      function logRewardScores(
+        markets: RewardMarket[],
+        spreadCents: number,
+        perSideUsdc: number,
+        isTwoSided: boolean,
+      ): void {
+        const twoSidedMultiplier = isTwoSided ? 2.0 : 1.0;
+
+        for (const market of markets.slice(0, 5)) {
+          const maxSpreadCents = market.maxSpread > 0 ? market.maxSpread * 100 : 10;
+          const penalty = 1 - Math.pow(spreadCents / maxSpreadCents, 2);
+          const score = perSideUsdc * penalty * twoSidedMultiplier;
+
+          console.log(chalk.dim(
+            `  ${market.question.slice(0, 45)}... ` +
+            `spread: ${spreadCents}c, penalty: ${penalty.toFixed(2)}, ` +
+            `two-sided: ${twoSidedMultiplier}x, score: ${score.toFixed(1)}`,
+          ));
+        }
+      }
+
       async function deployCapital(
         markets: RewardMarket[],
         allocations: AllocationResult[],
         trendByMarket?: Map<string, TrendDirection>,
       ): Promise<number> {
         console.log("Placing orders...");
+
+        const currentMintOptions: MintOptions | undefined = mintEnabled && sessionId !== null
+          ? { enabled: true, wallet: auth.wallet, env, sessionId }
+          : undefined;
 
         const placed = await placeOrdersForMarkets(
           auth.clobClient,
@@ -281,6 +315,7 @@ export const runCommand = new Command("run")
           minSizeOverride,
           useSmartAllocation ? allocations : undefined,
           trendByMarket,
+          currentMintOptions,
         );
 
         for (const order of placed) {
@@ -333,6 +368,19 @@ export const runCommand = new Command("run")
         } catch (err) {
           console.error(chalk.red("  Failed to cancel orders:"), err);
           return;
+        }
+
+        // Merge inventory from old markets before redeploying
+        if (sessionId !== null && mintEnabled) {
+          console.log("  Merging inventory from old markets...");
+          try {
+            const recovered = await mergeInventory(sessionId);
+            if (recovered > 0) {
+              console.log(chalk.green(`  Recovered $${recovered.toFixed(2)} USDC from inventory`));
+            }
+          } catch (err) {
+            console.log(chalk.yellow(`  Inventory merge error: ${(err as Error).message?.slice(0, 80)}`));
+          }
         }
 
         // Rediscover and allocate with fresh data
@@ -483,6 +531,13 @@ export const runCommand = new Command("run")
       console.log(chalk.green(`Placed ${placedCount} orders across ${targetMarkets.length} markets\n`));
       db.updateSessionStats(sessionId, { orders_placed: placedCount });
 
+      // Log estimated reward scores
+      const perSideBudget = budget / targetMarkets.length / 2;
+      const hasBothSides = placedCount > targetMarkets.length; // rough heuristic
+      console.log(chalk.dim("Estimated reward scores:"));
+      logRewardScores(targetMarkets, spreadCents, perSideBudget, mintEnabled && hasBothSides);
+      console.log();
+
       // Rebuild order index now that orders are placed
       monitor.rebuildOrderIndex();
 
@@ -543,13 +598,13 @@ export const runCommand = new Command("run")
             return;
           }
 
-          // 4. Execute hedge (buy opposite + merge)
+          // 4. Execute hedge (buy opposite + merge, or merge from inventory)
           const result = await executeHedge(
             auth.clobClient,
             auth.wallet,
             env,
             fill,
-            { maxHedgeCostCents: maxHedgeCostCents },
+            { maxHedgeCostCents, db, sessionId: sessionId ?? undefined },
           );
 
           // 5. Update hedge record
@@ -723,6 +778,71 @@ export const runCommand = new Command("run")
       // ───────────────────────────────────────────────────
       // GRACEFUL SHUTDOWN
       // ───────────────────────────────────────────────────
+      /**
+       * Merge remaining inventory tokens back into USDC.
+       * Returns amount of USDC recovered.
+       */
+      async function mergeInventory(currentSessionId: number): Promise<number> {
+        const inventory = db.getSessionInventory(currentSessionId);
+        if (inventory.length === 0) return 0;
+
+        // Group inventory by condition_id
+        const byCondition = new Map<string, { yes?: typeof inventory[0]; no?: typeof inventory[0] }>();
+        for (const inv of inventory) {
+          const entry = byCondition.get(inv.condition_id) ?? {};
+          if (inv.side === "YES") entry.yes = inv;
+          else entry.no = inv;
+          byCondition.set(inv.condition_id, entry);
+        }
+
+        let totalRecovered = 0;
+
+        for (const [conditionId, { yes, no }] of byCondition) {
+          // We need both YES and NO tokens to merge
+          if (!yes && !no) continue;
+
+          // Check on-chain balances
+          const tokenIds: string[] = [];
+          if (yes) tokenIds.push(yes.token_id);
+          if (no) tokenIds.push(no.token_id);
+
+          try {
+            const balances = await getTokenBalances(auth.wallet, env, tokenIds);
+            const balMap = new Map<string, ethers.BigNumber>();
+            for (const b of balances) {
+              balMap.set(b.tokenId, b.balance);
+            }
+
+            const balYes = yes ? (balMap.get(yes.token_id) ?? ethers.BigNumber.from(0)) : ethers.BigNumber.from(0);
+            const balNo = no ? (balMap.get(no.token_id) ?? ethers.BigNumber.from(0)) : ethers.BigNumber.from(0);
+
+            const mergeAmount = balYes.lt(balNo) ? balYes : balNo;
+            if (mergeAmount.isZero()) continue;
+
+            // Look up negRisk from markets table
+            const markets = db.getMarkets();
+            const market = markets.find(m => m.condition_id === conditionId);
+            const negRisk = market ? market.neg_risk === 1 : false;
+
+            const txHash = await mergePositions(auth.wallet, env, conditionId, negRisk, mergeAmount);
+            const recoveredUsdc = Number(ethers.utils.formatUnits(mergeAmount, 6));
+            totalRecovered += recoveredUsdc;
+
+            console.log(chalk.green(
+              `  Merged ${recoveredUsdc.toFixed(2)} USDC from ${conditionId.slice(0, 12)}... [tx: ${txHash.slice(0, 10)}...]`,
+            ));
+
+            // Update inventory balances
+            if (yes) db.updateInventoryBalance(yes.id, Math.max(0, Number(ethers.utils.formatUnits(balYes.sub(mergeAmount), 6))));
+            if (no) db.updateInventoryBalance(no.id, Math.max(0, Number(ethers.utils.formatUnits(balNo.sub(mergeAmount), 6))));
+          } catch (err) {
+            console.log(chalk.yellow(`  Failed to merge inventory for ${conditionId.slice(0, 12)}...: ${(err as Error).message?.slice(0, 80)}`));
+          }
+        }
+
+        return totalRecovered;
+      }
+
       const shutdown = async (signal: string) => {
         console.log(chalk.bold(`\n${signal} received. Shutting down gracefully...`));
         clearInterval(heartbeatInterval);
@@ -741,6 +861,21 @@ export const runCommand = new Command("run")
           console.log(chalk.green("All orders cancelled."));
         } catch (err) {
           console.error(chalk.red("Warning: Failed to cancel some orders"), err);
+        }
+
+        // Merge remaining inventory tokens back into USDC
+        if (sessionId !== null && mintEnabled) {
+          console.log("Merging remaining inventory...");
+          try {
+            const recovered = await mergeInventory(sessionId);
+            if (recovered > 0) {
+              console.log(chalk.green(`Recovered $${recovered.toFixed(2)} USDC from inventory merge`));
+            } else {
+              console.log(chalk.dim("No inventory to merge."));
+            }
+          } catch (err) {
+            console.error(chalk.yellow(`Warning: inventory merge error: ${(err as Error).message}`));
+          }
         }
 
         rawDb?.close();
