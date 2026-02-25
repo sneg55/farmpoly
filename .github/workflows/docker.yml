@@ -81,14 +81,22 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            # Deployment strategy: Replace with graceful shutdown
+            # 1. Pull new image
+            # 2. Stop old container with 30s timeout (allows order cancellation)
+            # 3. Start new container
+            # 4. Verify new container is healthy
+            # Note: ~30-40s downtime during deployment
+            
             # Login to GHCR
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
             # Pull latest image
             docker pull ghcr.io/${{ github.repository }}:latest
             
-            # Stop and remove old container
-            docker stop polyfarm || true
+            # Gracefully stop old container (30s timeout for order cancellation)
+            echo "Stopping old container (graceful shutdown)..."
+            docker stop --time 30 polyfarm || true
             docker rm polyfarm || true
             
             # Create .env file
@@ -108,5 +116,14 @@ jobs:
               ghcr.io/${{ github.repository }}:latest \
               run --budget 100 --spread 5 --max-markets 10 --rebalance-interval 60 --min-daily-yield 1
             
-            # Show logs
+            # Wait for container to start and verify it's running
+            sleep 5
+            if ! docker ps | grep -q polyfarm; then
+              echo "ERROR: Container failed to start"
+              docker logs polyfarm --tail 100
+              exit 1
+            fi
+            
+            # Show startup logs
+            echo "=== Deployment successful ==="
             docker logs polyfarm --tail 50
