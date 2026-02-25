@@ -119,9 +119,10 @@ function freshPayload(db: PolyfarmDb): string {
 
     const totalSize = mktOrders.reduce((s, o) => s + o.size, 0);
     const twoSidedMultiplier = isTwoSided ? 2.0 : 1.0;
-    const estimatedDaily = (m.reward_rate ?? 0) * spreadQuality * twoSidedMultiplier;
-
     const bookShare = m.tvl && m.tvl > 0 ? (totalSize / m.tvl) * 100 : 0;
+    // Our estimated daily reward = our share of TVL × market reward pool × quality × two-sided bonus
+    const ourShare = m.tvl && m.tvl > 0 ? totalSize / (m.tvl + totalSize) : 0;
+    const estimatedDaily = ourShare * (m.reward_rate ?? 0) * spreadQuality * twoSidedMultiplier;
 
     rewardScores.push({
       conditionId: m.condition_id,
