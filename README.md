@@ -44,9 +44,9 @@ Automated liquidity farming CLI for Polymarket. Earns rewards by placing two-sid
 
 ## Prerequisites
 
-- Node.js 18+
-- pnpm (`npm install -g pnpm`)
-- A Polygon wallet with USDC (MATIC for gas)
+- Node.js 22+
+- pnpm 10+ (`corepack enable && corepack prepare pnpm@10.28.2 --activate`)
+- A Polygon wallet with USDC (POL/MATIC for gas)
 
 ## Setup
 
@@ -143,6 +143,7 @@ pnpm dev run --budget 50 --spread 3 --no-mint
 | `--min-daily-yield <percent>` | `0` | Minimum daily yield % to consider |
 | `--min-rebalance-improvement <percent>` | `20` | Minimum profitability gain to trigger rebalance |
 | `--no-smart-allocation` | off | Use equal allocation instead of profitability-weighted |
+| `--exit-on-empty` | off | Exit if no markets found (default: retry with backoff) |
 
 #### Protection Layers
 
@@ -210,10 +211,11 @@ Opens a dark-themed web dashboard at `http://localhost:3737` with:
 - **Live orders** table (auto-refreshes every 2s via SSE)
 - **Position exposure** — inventory by market (minted, current balance, status)
 - **Hedge history** — fill side, fill/hedge prices, merge amount, P&L, status
-- **Markets** with spread quality score, competitor book share, two-sided indicator
+- **Markets** with spread quality score, competitor book share, two-sided indicator, clickable Polymarket links
 - **Recent activity** log (cancelled/filled orders)
 - **Panic button** to cancel all orders
 - **Token-gated auth** — cookie-based login page for remote access
+- Auto-refreshes every 2s via SSE
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -259,21 +261,24 @@ Cancels all open orders via the CLOB API without triggering a panic state.
 docker build -t polyfarm .
 ```
 
+The default CMD is `run --budget 30 --spread 3 --max-markets 3 --hedge-fills --placement-mode adaptive`.
+
 ### Run
 
 ```bash
-# Farming daemon
+# Farming daemon (production)
 docker run -d \
   --name polyfarm \
   --restart on-failure:10 \
   -v ./data:/data \
   --env-file .env \
   polyfarm \
-  run --budget 100 --spread 2 --max-markets 5 --placement-mode adaptive --hedge-fills
+  run --budget 500 --spread 2 --max-markets 5 --placement-mode adaptive --hedge-fills
 
-# Dashboard with remote access
+# Dashboard with remote access (shares the same DB volume)
 docker run -d \
   --name polyfarm-dashboard \
+  --restart on-failure:10 \
   -p 3737:3737 \
   -v ./data:/data \
   --env-file .env \
@@ -282,6 +287,16 @@ docker run -d \
   polyfarm \
   dashboard
 ```
+
+### CI/CD
+
+The GitHub Actions workflow (`.github/workflows/docker.yml`) handles the full pipeline:
+
+1. **Test** — runs `vitest` on every push/PR
+2. **Build** — multi-platform Docker image (`linux/amd64` + `linux/arm64`), pushed to GHCR
+3. **Deploy** — SSH to production server, graceful stop (30s timeout), restart both bot + dashboard containers
+
+Both containers share a `/data` volume for the SQLite database. The dashboard reads from the same DB the bot writes to (WAL mode enables concurrent access).
 
 ## Development
 
@@ -322,6 +337,8 @@ tests/
 - **Inventory merge**: BID fills merge with minted NO tokens for pure spread profit (no hedge buy needed)
 - **Hedge-on-fill fallback**: FOK → FAK for hedge buy, then on-chain merge via `ConditionalTokens.mergePositions()`
 - **Heartbeat recovery**: SDK returns corrected `heartbeat_id` in 400 error responses; we use it instead of resetting
+- **WebSocket resilience**: DNS failures (`EAI_AGAIN`) emit `ws_error` (not `error`) to avoid Node.js uncaught exception crash; reconnect handles recovery
+- **Discovery retry**: If no markets found on startup, retries with exponential backoff instead of exiting
 - **Float-safe comparisons** with epsilon (`1e-10`) for danger zone boundary checks
 
 ## License
