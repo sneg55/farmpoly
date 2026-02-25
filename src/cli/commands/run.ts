@@ -10,6 +10,7 @@ import {
   shouldRebalance,
   type RewardMarket,
   type AllocationResult,
+  type FilterStats,
 } from "../../discovery/rewards.js";
 import { placeOrdersForMarkets } from "../../orders/placer.js";
 import { cancelAllOrders, panicCancelAll, gracefulShutdown } from "../../orders/lifecycle.js";
@@ -37,6 +38,7 @@ export const runCommand = new Command("run")
   .option("--max-volatility <cents>", "Skip markets with >N cents 24h change", "5")
   .option("--placement-mode <mode>", "adaptive | bid-only | ask-only | both", "adaptive")
   .option("--warmup-seconds <s>", "Collect WS data before placing orders", "5")
+  .option("--exit-on-empty", "Exit immediately if no markets found (default: retry with backoff)", false)
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);
@@ -52,6 +54,11 @@ export const runCommand = new Command("run")
     const maxVolatilityCents = parseFloat(opts.maxVolatility);
     const placementMode: string = opts.placementMode;
     const warmupSeconds = parseInt(opts.warmupSeconds);
+    const exitOnEmpty: boolean = opts.exitOnEmpty === true;
+
+    // Mutable filter values — start at user config, relax on sustained failure
+    let effectiveMaxVolatility = maxVolatilityCents;
+    let effectiveMinDailyYield = minDailyYield;
 
     if (isNaN(budget) || budget <= 0) {
       console.error(chalk.red("--budget must be a positive number"));
@@ -206,29 +213,42 @@ export const runCommand = new Command("run")
       }
 
       /**
+       * Log filter funnel stats so users can see where markets get rejected
+       */
+      function logFilterFunnel(stats: FilterStats, affordable: number): void {
+        console.log(chalk.dim("  Filter funnel:"));
+        console.log(chalk.dim(`    Gamma API:         ${stats.total} markets`));
+        console.log(chalk.dim(`    With rewards:      ${stats.withRewards}`));
+        console.log(chalk.dim(`    With token IDs:    ${stats.withTokenIds}`));
+        console.log(chalk.dim(`    Safety bounds:     ${stats.withinSafetyBounds}`));
+        console.log(chalk.dim(`    Volatility cap:    ${stats.withinVolatility} (≤${effectiveMaxVolatility}c)`));
+        console.log(chalk.dim(`    Stability ≥0.2:    ${stats.withinStability}`));
+        console.log(chalk.dim(`    Min yield:         ${stats.withinYield} (≥${effectiveMinDailyYield}%)`));
+        console.log(chalk.dim(`    Affordable ($${budget}): ${affordable}`));
+      }
+
+      /**
        * Discover and select markets based on profitability + stability
        */
       async function discoverAndAllocate(): Promise<{
         markets: RewardMarket[];
         allocations: AllocationResult[];
         gammaMarkets: GammaMarket[];
+        stats: FilterStats;
       }> {
         const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
-        const rewardMarkets = filterRewardMarkets(gammaMarkets, {
-          minDailyYield,
+        const { markets: rewardMarkets, stats } = filterRewardMarkets(gammaMarkets, {
+          minDailyYield: effectiveMinDailyYield,
           sortByProfitability: true,
           spreadCents,
-          maxVolatilityCents,
+          maxVolatilityCents: effectiveMaxVolatility,
         });
-
-        if (rewardMarkets.length === 0 && gammaMarkets.length > 0) {
-          console.log(chalk.yellow("All markets filtered out by stability/volatility checks."));
-        }
 
         if (useSmartAllocation) {
           const allocations = allocateCapitalSmart(rewardMarkets, budget, maxMarkets);
           const markets = allocations.map(a => a.market);
-          return { markets, allocations, gammaMarkets };
+          logFilterFunnel(stats, markets.length);
+          return { markets, allocations, gammaMarkets, stats };
         } else {
           const perSideMax = budget / 2;
           const affordable = rewardMarkets.filter((m) => {
@@ -237,7 +257,8 @@ export const runCommand = new Command("run")
             return costPerSide <= perSideMax;
           });
           const markets = (affordable.length > 0 ? affordable : rewardMarkets).slice(0, maxMarkets);
-          return { markets, allocations: [], gammaMarkets };
+          logFilterFunnel(stats, markets.length);
+          return { markets, allocations: [], gammaMarkets, stats };
         }
       }
 
@@ -280,11 +301,11 @@ export const runCommand = new Command("run")
         console.log(chalk.bold("\nChecking for rebalancing opportunities..."));
 
         const gammaMarkets = await fetchGammaMarkets(env.gammaApiUrl);
-        const allRewardMarkets = filterRewardMarkets(gammaMarkets, {
-          minDailyYield,
+        const { markets: allRewardMarkets } = filterRewardMarkets(gammaMarkets, {
+          minDailyYield: effectiveMinDailyYield,
           sortByProfitability: true,
           spreadCents,
-          maxVolatilityCents,
+          maxVolatilityCents: effectiveMaxVolatility,
         });
 
         const decision = shouldRebalance(
@@ -351,16 +372,58 @@ export const runCommand = new Command("run")
       }
 
       // ───────────────────────────────────────────────────
-      // DISCOVERY + TREND DETECTION
+      // DISCOVERY + RETRY LOOP (crash-loop prevention)
       // ───────────────────────────────────────────────────
       console.log("Discovering reward markets (with stability filtering)...");
-      const { markets: targetMarkets, allocations, gammaMarkets } = await discoverAndAllocate();
+      let discoveryResult = await discoverAndAllocate();
+      let discoveryRetries = 0;
+      const DISCOVERY_BASE_BACKOFF_MS = 60_000; // 1 minute
+      const DISCOVERY_MAX_BACKOFF_MS = 30 * 60_000; // 30 minutes
+      const DISCOVERY_RELAX_AFTER = 6; // relax filters after this many retries
 
-      if (targetMarkets.length === 0) {
-        console.log(chalk.yellow("No reward markets found. Exiting."));
-        monitor.stop();
-        rawDb?.close();
-        return;
+      while (discoveryResult.markets.length === 0) {
+        if (exitOnEmpty) {
+          console.log(chalk.yellow("No reward markets found. Exiting (--exit-on-empty)."));
+          monitor.stop();
+          rawDb?.close();
+          return;
+        }
+
+        discoveryRetries++;
+
+        // Relax filters after sustained failure
+        if (discoveryRetries > 0 && discoveryRetries % DISCOVERY_RELAX_AFTER === 0) {
+          const oldVol = effectiveMaxVolatility;
+          const oldYield = effectiveMinDailyYield;
+          effectiveMaxVolatility = Math.min(effectiveMaxVolatility + 2, 15);
+          effectiveMinDailyYield = Math.max(effectiveMinDailyYield - 0.1, 0);
+          console.log(chalk.yellow(
+            `Relaxing filters after ${discoveryRetries} attempts: ` +
+            `volatility ${oldVol}c→${effectiveMaxVolatility}c, ` +
+            `min-yield ${oldYield.toFixed(1)}%→${effectiveMinDailyYield.toFixed(1)}%`,
+          ));
+        }
+
+        const backoffMs = Math.min(
+          DISCOVERY_BASE_BACKOFF_MS * Math.pow(2, Math.min(discoveryRetries - 1, 4)),
+          DISCOVERY_MAX_BACKOFF_MS,
+        );
+        const backoffMin = (backoffMs / 60_000).toFixed(1);
+
+        console.log(chalk.yellow(
+          `No reward markets found. Retrying in ${backoffMin}min ` +
+          `(attempt ${discoveryRetries}, volatility cap: ${effectiveMaxVolatility}c, ` +
+          `min-yield: ${effectiveMinDailyYield.toFixed(1)}%)`,
+        ));
+
+        await new Promise(r => setTimeout(r, backoffMs));
+        console.log("Retrying market discovery...");
+        discoveryResult = await discoverAndAllocate();
+      }
+
+      const { markets: targetMarkets, allocations, gammaMarkets } = discoveryResult;
+      if (discoveryRetries > 0) {
+        console.log(chalk.green(`Markets found after ${discoveryRetries} retries.`));
       }
 
       console.log(chalk.green(`Found ${targetMarkets.length} reward markets\n`));

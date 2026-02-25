@@ -28,7 +28,7 @@ export const discoverCommand = new Command("discover")
       const minDailyYield = parseFloat(opts.minDailyYield);
       const sortByProfitability = !opts.sortByRate;
       
-      const rewardMarkets = filterRewardMarkets(gammaMarkets, {
+      const { markets: rewardMarkets } = filterRewardMarkets(gammaMarkets, {
         minDailyYield,
         sortByProfitability,
       });

@@ -119,7 +119,7 @@ jobs:
             # --rebalance-interval 60: Re-score markets every hour
             docker run -d \
               --name polyfarm \
-              --restart unless-stopped \
+              --restart on-failure:10 \
               -v /opt/farmpoly-data:/data \
               --env-file /opt/farmpoly/.env \
               ghcr.io/${{ github.repository }}:latest \

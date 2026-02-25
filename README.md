@@ -237,7 +237,7 @@ docker build -t polyfarm .
 ```bash
 docker run -d \
   --name polyfarm \
-  --restart unless-stopped \
+  --restart on-failure:10 \
   -v ./data:/data \
   --env-file .env \
   polyfarm \

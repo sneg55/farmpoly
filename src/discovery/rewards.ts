@@ -109,6 +109,16 @@ export function calculateProfitabilityScore(
   return score;
 }
 
+export interface FilterStats {
+  total: number;
+  withRewards: number;
+  withTokenIds: number;
+  withinSafetyBounds: number;
+  withinVolatility: number;
+  withinStability: number;
+  withinYield: number;
+}
+
 export interface FilterOptions {
   /** Minimum daily yield % to include */
   minDailyYield?: number;
@@ -120,10 +130,15 @@ export interface FilterOptions {
   maxVolatilityCents?: number;
 }
 
+export interface FilterResult {
+  markets: RewardMarket[];
+  stats: FilterStats;
+}
+
 export function filterRewardMarkets(
   gammaMarkets: GammaMarket[],
   options: FilterOptions = {},
-): RewardMarket[] {
+): FilterResult {
   const {
     minDailyYield = 0,
     sortByProfitability = true,
@@ -131,28 +146,43 @@ export function filterRewardMarkets(
     maxVolatilityCents = 5,
   } = options;
 
+  const stats: FilterStats = {
+    total: gammaMarkets.length,
+    withRewards: 0,
+    withTokenIds: 0,
+    withinSafetyBounds: 0,
+    withinVolatility: 0,
+    withinStability: 0,
+    withinYield: 0,
+  };
+
   const rewardMarkets: RewardMarket[] = [];
 
   for (const market of gammaMarkets) {
     // Must have reward data
     if (!market.rewardsDailyRate || market.rewardsDailyRate <= 0) continue;
+    stats.withRewards++;
 
     // Must have both token IDs
     if (!market.tokenIdYes || !market.tokenIdNo) continue;
+    stats.withTokenIds++;
 
     const midpoint = computeMidpoint(market.priceYes, market.priceNo);
 
     // Safety bounds: skip markets where price is extreme
     if (!isWithinSafetyBounds(midpoint)) continue;
+    stats.withinSafetyBounds++;
 
     // Volatility filter: skip markets with excessive 24h price change
     if (isTooVolatile(market, maxVolatilityCents)) continue;
+    stats.withinVolatility++;
 
     // Calculate stability score
     const stabilityScore = calculateStabilityScore(market);
 
     // Filter out markets that are too risky (stability < 0.2)
     if (stabilityScore < 0.2) continue;
+    stats.withinStability++;
 
     // tickSize from API is a number (e.g. 0.01), convert to string for SDK
     const tickSizeStr = String(market.tickSize);
@@ -169,6 +199,7 @@ export function filterRewardMarkets(
 
     // Filter by minimum daily yield
     if (dailyYieldPercent < minDailyYield) continue;
+    stats.withinYield++;
 
     rewardMarkets.push({
       conditionId: market.conditionId,
@@ -196,7 +227,7 @@ export function filterRewardMarkets(
     rewardMarkets.sort((a, b) => b.rewardRate - a.rewardRate);
   }
 
-  return rewardMarkets;
+  return { markets: rewardMarkets, stats };
 }
 
 /**
