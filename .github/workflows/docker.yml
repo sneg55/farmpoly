@@ -83,22 +83,31 @@ jobs:
           script: |
             # Deployment strategy: Replace with graceful shutdown
             # 1. Pull new image
-            # 2. Stop old container with 30s timeout (allows order cancellation)
-            # 3. Start new container
-            # 4. Verify new container is healthy
+            # 2. Stop old containers (bot + dashboard) with 30s timeout
+            # 3. Start new bot + dashboard containers
+            # 4. Verify containers are healthy
             # Note: ~30-40s downtime during deployment
-            
+
             # Login to GHCR
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            
+
             # Pull latest image
             docker pull ghcr.io/${{ github.repository }}:latest
-            
-            # Gracefully stop old container (30s timeout for order cancellation)
-            echo "Stopping old container (graceful shutdown)..."
+
+            # Clean up any stale containers from previous naming schemes
+            docker stop polyfarm-bot 2>/dev/null || true
+            docker rm polyfarm-bot 2>/dev/null || true
+
+            # Gracefully stop bot container (30s timeout for order cancellation)
+            echo "Stopping bot container (graceful shutdown)..."
             docker stop --time 30 polyfarm || true
             docker rm polyfarm || true
-            
+
+            # Stop dashboard container
+            echo "Stopping dashboard container..."
+            docker stop polyfarm-dashboard || true
+            docker rm polyfarm-dashboard || true
+
             # Create .env file
             cat > /opt/farmpoly/.env << 'EOF'
             POLYGON_PRIVATE_KEY=${{ secrets.POLYGON_PRIVATE_KEY }}
@@ -106,8 +115,8 @@ jobs:
             CLOB_API_URL=https://clob.polymarket.com
             GAMMA_API_URL=https://gamma-api.polymarket.com
             EOF
-            
-            # Start new container
+
+            # Start bot container
             # TWO-SIDED LIQUIDITY: Mint-and-quote with 2x reward multiplier
             # --spread 2: Target 2c from midpoint (67% spread quality vs 27% at 3c)
             # --danger-zone 3: Graduated response (yellow warning at 3c, red cancel at 1.5c)
@@ -124,15 +133,35 @@ jobs:
               --env-file /opt/farmpoly/.env \
               ghcr.io/${{ github.repository }}:latest \
               run --budget 500 --spread 2 --danger-zone 3 --max-markets 5 --max-volatility 5 --placement-mode adaptive --hedge-fills --warmup-seconds 5 --rebalance-interval 60
-            
-            # Wait for container to start and verify it's running
+
+            # Start dashboard container (shares DB volume + env)
+            docker run -d \
+              --name polyfarm-dashboard \
+              --restart on-failure:10 \
+              -p 3737:3737 \
+              -v /opt/farmpoly-data:/data \
+              --env-file /opt/farmpoly/.env \
+              -e POLYFARM_DASHBOARD_HOST=0.0.0.0 \
+              -e POLYFARM_DASHBOARD_TOKEN=${{ secrets.DASHBOARD_TOKEN }} \
+              ghcr.io/${{ github.repository }}:latest \
+              dashboard
+
+            # Wait for containers to start and verify
             sleep 5
             if ! docker ps | grep -q polyfarm; then
-              echo "ERROR: Container failed to start"
+              echo "ERROR: Bot container failed to start"
               docker logs polyfarm --tail 100
               exit 1
             fi
-            
+            if ! docker ps | grep -q polyfarm-dashboard; then
+              echo "ERROR: Dashboard container failed to start"
+              docker logs polyfarm-dashboard --tail 100
+              exit 1
+            fi
+
             # Show startup logs
             echo "=== Deployment successful ==="
-            docker logs polyfarm --tail 50
+            echo "--- Bot logs ---"
+            docker logs polyfarm --tail 30
+            echo "--- Dashboard logs ---"
+            docker logs polyfarm-dashboard --tail 10
