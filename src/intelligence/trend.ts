@@ -42,8 +42,21 @@ export function detectTrend(
 
 /**
  * Determine which order sides are allowed for a given trend.
+ *
+ * When mintEnabled=true (two-sided quoting), UP/DOWN trends still place both sides
+ * because minted tokens provide inventory for ASK and fills merge for profit.
+ * Only CHOPPY skips the market entirely.
  */
-export function allowedSides(trend: TrendDirection): { bid: boolean; ask: boolean } {
+export function allowedSides(trend: TrendDirection, mintEnabled = false): { bid: boolean; ask: boolean } {
+  if (mintEnabled) {
+    // With minting: two-sided for everything except CHOPPY
+    // UP/DOWN trends are tolerable because fills are hedged via inventory merge
+    return trend === "CHOPPY"
+      ? { bid: false, ask: false }
+      : { bid: true, ask: true };
+  }
+
+  // Without minting (BID-only era): one-sided based on trend
   switch (trend) {
     case "UP":
       return { bid: false, ask: true }; // Price moving up → safe to sell (ASK)

@@ -112,8 +112,9 @@ export async function placeOrdersForMarkets(
 
   for (const market of markets) {
     // Determine which sides are allowed based on trend
+    // When minting is enabled, keep both sides active for UP/DOWN trends (only CHOPPY skips)
     const trend = trendByMarket?.get(market.conditionId);
-    const sides = trend ? allowedSides(trend) : { bid: true, ask: true };
+    const sides = trend ? allowedSides(trend, !!mintOptions?.enabled) : { bid: true, ask: true };
 
     if (!sides.bid && !sides.ask) {
       console.log(`  Skipping ${market.question.slice(0, 50)}... (CHOPPY trend, too dangerous)`);
