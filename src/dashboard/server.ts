@@ -61,8 +61,12 @@ export interface RewardScore {
 function freshPayload(db: PolyfarmDb): string {
   const session = db.getActiveSession() ?? null;
   const liveOrders = db.getLiveOrders();
-  const markets = db.getMarkets();
+  const allMarkets = db.getMarkets();
   const recentOrders = db.getRecentOrders(50);
+
+  // Only show markets we're actively quoting (have live orders)
+  const quotedConditionIds = new Set(liveOrders.map((o) => o.condition_id));
+  const markets = allMarkets.filter((m) => quotedConditionIds.has(m.condition_id));
   const hedges = db.getRecentHedges(50);
 
   // Inventory — only if active session
