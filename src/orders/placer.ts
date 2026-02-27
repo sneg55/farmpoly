@@ -6,15 +6,18 @@ import type { PolyfarmDb } from "../db/database.js";
 import type { RewardMarket, AllocationResult } from "../discovery/rewards.js";
 import type { TrendDirection } from "../intelligence/trend.js";
 import { allowedSides } from "../intelligence/trend.js";
-import { calculateSafePrices, sharesToBuy, allocateBudget } from "./calculator.js";
+import { calculateSafePrices, sharesToBuy, allocateBudget, type SafePrices } from "./calculator.js";
 import { splitPosition } from "../positions/splitter.js";
 import { getTokenBalances } from "../positions/fetcher.js";
+import { checkApproval } from "../auth/approval.js";
 
 export interface MintOptions {
   enabled: boolean;
   wallet: Wallet;
   env: EnvConfig;
   sessionId: number;
+  /** Max % of total budget that may be spent on minting (0-100, default 50) */
+  mintBudgetPercent: number;
 }
 
 export interface PlacedOrder {
@@ -75,8 +78,26 @@ async function placeSingleOrder(
   throw new Error(`Failed to place order: ${JSON.stringify(response)}`);
 }
 
+/** Precomputed context for a single market used by the two-pass order placement. */
+interface MarketContext {
+  market: RewardMarket;
+  prices: SafePrices;
+  perSideUsdc: number;
+  effectiveMinSize: number;
+  sides: { bid: boolean; ask: boolean };
+  bidSize: number;
+  bidCost: number;
+  askSize: number;
+  askCost: number;
+}
+
 /**
  * Place BID + ASK orders for a set of markets within budget.
+ *
+ * Uses a two-pass approach:
+ *   Pass 1 — all BIDs first (USDC stays on-chain, visible to CLOB for balance checks)
+ *   Pass 2 — ASKs with conditional minting (capped at mintBudgetPercent of total budget)
+ *
  * If allocations are provided, use them for weighted capital distribution.
  * Otherwise, use equal allocation across all markets.
  */
@@ -103,16 +124,14 @@ export async function placeOrdersForMarkets(
   const { perSideUsdc: defaultPerSide } = allocateBudget(totalBudgetUsdc, markets.length);
 
   const placedOrders: PlacedOrder[] = [];
-  // Track cumulative committed capital to avoid over-committing beyond total budget.
-  // Use a small absolute epsilon to absorb floating-point rounding only.
-  // Previous 2% margin was too aggressive — blocked valid ASK orders in single-market case.
   const effectiveBudget = totalBudgetUsdc + 0.01;
   let committedUsdc = 0;
   const expiration = getEndOfDayUtc();
 
+  // ── Phase 0: Precompute MarketContext[] ────────────────────────────
+  const contexts: MarketContext[] = [];
+
   for (const market of markets) {
-    // Determine which sides are allowed based on trend
-    // When minting is enabled, keep both sides active for UP/DOWN trends (only CHOPPY skips)
     const trend = trendByMarket?.get(market.conditionId);
     const sides = trend ? allowedSides(trend, !!mintOptions?.enabled) : { bid: true, ask: true };
 
@@ -121,7 +140,7 @@ export async function placeOrdersForMarkets(
       continue;
     }
 
-    // Ensure market exists in DB (FK constraint: orders.condition_id → markets.condition_id)
+    // Ensure market exists in DB (FK constraint)
     db.upsertMarket({
       condition_id: market.conditionId,
       question: market.question,
@@ -135,9 +154,7 @@ export async function placeOrdersForMarkets(
       reward_rate: market.rewardRate,
     });
 
-    // Get per-market budget (from allocation or equal split)
     const marketBudget = allocationMap.get(market.conditionId) ?? (defaultPerSide * 2);
-    // When one-sided, allocate full market budget to the single side
     const oneSided = !sides.bid || !sides.ask;
     const perSideUsdc = oneSided ? marketBudget : marketBudget / 2;
 
@@ -146,9 +163,7 @@ export async function placeOrdersForMarkets(
       console.log(`  One-sided: skipping ${skippedSide} for ${market.question.slice(0, 40)}... (trend: ${trend})`);
     }
 
-    // Enforce rewardsMaxSpread: pass maxSpread to calculator
     const maxSpreadCents = market.maxSpread > 0 ? market.maxSpread * 100 : undefined;
-
     const prices = calculateSafePrices(
       market.midpoint,
       spreadCents,
@@ -164,10 +179,30 @@ export async function placeOrdersForMarkets(
     }
 
     const effectiveMinSize = minSizeOverride ?? market.minSize;
-
-    // BID side: BUY YES below midpoint — costs price × size USDC
     const bidSize = sharesToBuy(perSideUsdc, prices.bidPrice);
     const bidCost = prices.bidPrice * bidSize;
+    const askSize = sharesToBuy(perSideUsdc, 1 - prices.askPrice);
+    const askCost = (1 - prices.askPrice) * askSize;
+
+    contexts.push({
+      market,
+      prices,
+      perSideUsdc,
+      effectiveMinSize,
+      sides,
+      bidSize,
+      bidCost,
+      askSize,
+      askCost,
+    });
+  }
+
+  // ── Pass 1: BIDs only (no minting, no on-chain USDC spent) ────────
+  let bidCount = 0;
+  let committedBidUsdc = 0;
+
+  for (const ctx of contexts) {
+    const { market, prices, sides, bidSize, bidCost, effectiveMinSize, perSideUsdc } = ctx;
 
     if (!sides.bid) {
       // Trend says skip BID
@@ -193,6 +228,8 @@ export async function placeOrdersForMarkets(
         );
 
         committedUsdc += bidCost;
+        committedBidUsdc += bidCost;
+        bidCount++;
 
         db.insertOrder({
           order_id: orderId,
@@ -223,14 +260,33 @@ export async function placeOrdersForMarkets(
         );
       }
     }
+  }
 
-    // ASK side: SELL YES above midpoint
-    // When minting: cost is the full split amount (locked as collateral)
-    // Without minting: cost is (1 - price) × size USDC (theoretical collateral)
-    const askSize = sharesToBuy(perSideUsdc, 1 - prices.askPrice);
-    // With minting, the actual USDC cost of the split is askSize * price_per_token = askSize in USDC units
-    // because splitPosition locks $1 per YES+NO pair. But we only split askCost USDC worth.
-    const askCost = (1 - prices.askPrice) * askSize;
+  if (bidCount > 0) {
+    console.log(`  Pass 1: ${bidCount} BID orders, $${committedBidUsdc.toFixed(2)} committed`);
+  }
+
+  // ── Pass 2: ASKs with conditional minting ─────────────────────────
+  let askCount = 0;
+  let mintedUsdc = 0;
+  const mintBudgetUsdc = mintOptions?.enabled
+    ? totalBudgetUsdc * (mintOptions.mintBudgetPercent / 100)
+    : 0;
+
+  // Query on-chain USDC balance once before Pass 2 (for mint guards)
+  let localMintableUsdc = 0;
+  if (mintOptions?.enabled) {
+    try {
+      const approval = await checkApproval(mintOptions.wallet, mintOptions.env);
+      localMintableUsdc = Number(approval.balance) / 1e6;
+    } catch (err) {
+      console.log(`  Warning: could not query on-chain USDC balance, minting disabled for this cycle: ${(err as Error).message?.slice(0, 100)}`);
+      localMintableUsdc = 0;
+    }
+  }
+
+  for (const ctx of contexts) {
+    const { market, prices, sides, askSize, askCost, effectiveMinSize, perSideUsdc } = ctx;
 
     if (!sides.ask) {
       // Trend says skip ASK
@@ -253,38 +309,52 @@ export async function placeOrdersForMarkets(
             const onChainYes = balances.length > 0 ? Number(balances[0].balance) / 1e6 : 0;
             const deficitShares = askSize - onChainYes;
 
-            // Cap split at budget-allowed askCost to avoid over-minting beyond what the wallet can afford.
-            // Each YES+NO pair costs $1 USDC, but we only need askCost worth of exposure.
             const splitUsdc = Math.min(deficitShares, askCost);
 
             if (splitUsdc > 0) {
-              console.log(`  Minting [${market.negRisk ? 'NegRisk' : 'CTF'}]: splitting $${splitUsdc.toFixed(2)} USDC → YES+NO tokens`);
-              await splitPosition(
-                mintOptions.wallet,
-                mintOptions.env,
-                market.conditionId,
-                market.negRisk,
-                splitUsdc,
-              );
+              // Three guards before minting
+              const guard1 = committedUsdc + askCost <= effectiveBudget;
+              const guard2 = mintedUsdc + splitUsdc <= mintBudgetUsdc + 0.01;
+              const guard3 = localMintableUsdc >= splitUsdc;
 
-              // Record NO tokens in inventory
-              db.upsertInventory({
-                session_id: mintOptions.sessionId,
-                condition_id: market.conditionId,
-                token_id: market.tokenIdNo,
-                side: "NO",
-                minted_amount: splitUsdc,
-                current_balance: splitUsdc,
-              });
-              // Record YES tokens too (they'll be consumed by ASK)
-              db.upsertInventory({
-                session_id: mintOptions.sessionId,
-                condition_id: market.conditionId,
-                token_id: market.tokenIdYes,
-                side: "YES",
-                minted_amount: splitUsdc,
-                current_balance: splitUsdc,
-              });
+              if (!guard1) {
+                console.log(`  Skip mint: total budget exceeded`);
+              } else if (!guard2) {
+                console.log(`  Skip mint: mint cap reached ($${mintedUsdc.toFixed(2)} + $${splitUsdc.toFixed(2)} > $${mintBudgetUsdc.toFixed(2)} cap)`);
+              } else if (!guard3) {
+                console.log(`  Skip mint: insufficient on-chain USDC ($${localMintableUsdc.toFixed(2)} < $${splitUsdc.toFixed(2)} needed)`);
+              } else {
+                console.log(`  Minting [${market.negRisk ? 'NegRisk' : 'CTF'}]: splitting $${splitUsdc.toFixed(2)} USDC → YES+NO tokens`);
+                await splitPosition(
+                  mintOptions.wallet,
+                  mintOptions.env,
+                  market.conditionId,
+                  market.negRisk,
+                  splitUsdc,
+                );
+
+                mintedUsdc += splitUsdc;
+                localMintableUsdc -= splitUsdc;
+
+                // Record NO tokens in inventory
+                db.upsertInventory({
+                  session_id: mintOptions.sessionId,
+                  condition_id: market.conditionId,
+                  token_id: market.tokenIdNo,
+                  side: "NO",
+                  minted_amount: splitUsdc,
+                  current_balance: splitUsdc,
+                });
+                // Record YES tokens too (they'll be consumed by ASK)
+                db.upsertInventory({
+                  session_id: mintOptions.sessionId,
+                  condition_id: market.conditionId,
+                  token_id: market.tokenIdYes,
+                  side: "YES",
+                  minted_amount: splitUsdc,
+                  current_balance: splitUsdc,
+                });
+              }
             }
           } catch (splitErr) {
             const msg = (splitErr as Error).message || String(splitErr);
@@ -304,6 +374,7 @@ export async function placeOrdersForMarkets(
         );
 
         committedUsdc += askCost;
+        askCount++;
 
         db.insertOrder({
           order_id: orderId,
@@ -344,8 +415,12 @@ export async function placeOrdersForMarkets(
     }
   }
 
+  if (askCount > 0 || mintedUsdc > 0) {
+    console.log(`  Pass 2: ${askCount} ASK orders, minted $${mintedUsdc.toFixed(2)} / $${mintBudgetUsdc.toFixed(2)} cap`);
+  }
+
   if (placedOrders.length > 0) {
-    console.log(`  Total committed: $${committedUsdc.toFixed(2)} / $${totalBudgetUsdc} USDC`);
+    console.log(`  Total: $${committedUsdc.toFixed(2)} / $${totalBudgetUsdc} budget`);
   }
 
   return placedOrders;

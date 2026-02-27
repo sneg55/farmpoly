@@ -46,6 +46,7 @@ export const runCommand = new Command("run")
   .option("--warmup-seconds <s>", "Collect WS data before placing orders", "5")
   .option("--exit-on-empty", "Exit immediately if no markets found (default: retry with backoff)", false)
   .option("--no-mint", "Disable token minting (BID-only mode for ASK)")
+  .option("--mint-budget-pct <percent>", "Max % of budget for minting (0-100)", "50")
   .action(async (opts) => {
     const budget = parseFloat(opts.budget);
     const spreadCents = parseFloat(opts.spread);
@@ -63,6 +64,11 @@ export const runCommand = new Command("run")
     const warmupSeconds = parseInt(opts.warmupSeconds);
     const exitOnEmpty: boolean = opts.exitOnEmpty === true;
     const mintEnabled: boolean = opts.mint !== false;
+    const mintBudgetPct = parseFloat(opts.mintBudgetPct);
+    if (isNaN(mintBudgetPct) || mintBudgetPct < 0 || mintBudgetPct > 100) {
+      console.error(chalk.red("--mint-budget-pct must be a number between 0 and 100"));
+      process.exit(1);
+    }
 
     // Mutable filter values — start at user config, relax on sustained failure
     let effectiveMaxVolatility = maxVolatilityCents;
@@ -92,6 +98,9 @@ export const runCommand = new Command("run")
       console.log(`  Smart allocation: ${useSmartAllocation ? chalk.green("ON") : chalk.yellow("OFF")}`);
       console.log(`  Hedge fills: ${hedgeFills ? chalk.green("ON") : chalk.yellow("OFF")}`);
       console.log(`  Mint tokens: ${mintEnabled ? chalk.green("ON (two-sided)") : chalk.yellow("OFF (BID-only ASK)")}`);
+      if (mintEnabled) {
+        console.log(`  Mint budget: ${mintBudgetPct}% of total ($${(budget * mintBudgetPct / 100).toFixed(2)})`);
+      }
       console.log(`  Placement mode: ${placementMode}`);
       console.log(`  Max volatility: ${maxVolatilityCents}c`);
       console.log(`  WS warmup: ${warmupSeconds}s`);
@@ -328,7 +337,7 @@ export const runCommand = new Command("run")
         console.log("Placing orders...");
 
         const currentMintOptions: MintOptions | undefined = mintEnabled && sessionId !== null
-          ? { enabled: true, wallet: auth.wallet, env, sessionId }
+          ? { enabled: true, wallet: auth.wallet, env, sessionId, mintBudgetPercent: mintBudgetPct }
           : undefined;
 
         const placed = await placeOrdersForMarkets(
