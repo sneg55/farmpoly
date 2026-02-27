@@ -19,7 +19,7 @@ import { SafetyMonitor } from "../../safety/monitor.js";
 import { detectTrend, type TrendDirection } from "../../intelligence/trend.js";
 import { FillDetector, type FillEvent } from "../../hedge/detector.js";
 import { executeHedge } from "../../hedge/executor.js";
-import { getTokenBalances, discoverHeldTokens } from "../../positions/fetcher.js";
+import { getTokenBalances, discoverHeldTokens, discoverPositions } from "../../positions/fetcher.js";
 import { mergePositions } from "../../hedge/merger.js";
 import { autoRedeemResolved } from "../../positions/auto-redeemer.js";
 import { checkApproval } from "../../auth/approval.js";
@@ -836,19 +836,22 @@ export const runCommand = new Command("run")
         console.log(chalk.dim("\n[Sweep] Starting inventory sweep..."));
         let totalRecovered = 0;
 
-        // 1. Discover all on-chain token balances
-        const heldTokens = await discoverHeldTokens(auth.wallet, env);
-        if (heldTokens.length === 0) {
-          console.log(chalk.dim("[Sweep] No tokens held on-chain."));
+        // 1. Discover all positions via Data API (falls back to RPC)
+        const discoveredPositions = await discoverPositions(auth.wallet, env);
+        if (discoveredPositions.length === 0) {
+          console.log(chalk.dim("[Sweep] No tokens held."));
           return 0;
         }
-        console.log(chalk.dim(`[Sweep] Found ${heldTokens.length} non-zero token balance(s).`));
+        console.log(chalk.dim(`[Sweep] Found ${discoveredPositions.length} non-zero position(s).`));
 
         // Build tokenId → balance map
         const balanceMap = new Map<string, ethers.BigNumber>();
-        for (const t of heldTokens) {
+        for (const t of discoveredPositions) {
           balanceMap.set(t.tokenId, t.balance);
         }
+
+        // Convert to TokenBalance[] for auto-redeemer compatibility
+        const heldTokens = discoveredPositions.map(p => ({ tokenId: p.tokenId, balance: p.balance }));
 
         // 2. Merge paired YES+NO positions
         const markets = db.getMarkets();

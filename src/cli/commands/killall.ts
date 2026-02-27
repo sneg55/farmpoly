@@ -4,14 +4,13 @@ import { ethers } from "ethers";
 import { loadEnv } from "../../utils/config.js";
 import { createDatabase, PolyfarmDb } from "../../db/database.js";
 import { deriveOrLoadCreds } from "../../auth/credentials.js";
-import { discoverHeldTokens } from "../../positions/fetcher.js";
+import { discoverPositions } from "../../positions/fetcher.js";
 import { killAllPositions } from "../../positions/seller.js";
 
 export const killallCommand = new Command("killall")
   .description("Emergency: cancel all orders AND market-sell all positions")
   .option("--dry-run", "Show positions that would be sold without executing")
   .option("--skip-cancel", "Skip cancelling open limit orders (if already cancelled via panic)")
-  .option("--from-block <number>", "Start scanning from this block (default: ~6mo ago)")
   .action(async (opts) => {
     try {
       console.log(chalk.red.bold("KILLALL: This will MARKET SELL all positions at current prices\n"));
@@ -22,12 +21,11 @@ export const killallCommand = new Command("killall")
       const db = new PolyfarmDb(rawDb);
       const auth = await deriveOrLoadCreds(env, db);
 
-      // 2. Discover held tokens via on-chain Transfer events
-      console.log("Discovering ERC1155 tokens in wallet...");
-      const fromBlock = opts.fromBlock ? Number(opts.fromBlock) : undefined;
-      const heldTokens = await discoverHeldTokens(auth.wallet, env, fromBlock);
+      // 2. Discover held positions via Polymarket Data API (falls back to RPC scan)
+      console.log("Discovering positions via Polymarket Data API...");
+      const positions = await discoverPositions(auth.wallet, env);
 
-      if (heldTokens.length === 0) {
+      if (positions.length === 0) {
         console.log(chalk.yellow("No non-zero token balances found."));
 
         // Still cancel orders if not skipped
@@ -41,20 +39,31 @@ export const killallCommand = new Command("killall")
         return;
       }
 
-      // 3. Match tokens to markets in DB for display
-      const markets = db.getMarkets();
-      const marketByYes = new Map(markets.map((m) => [m.token_id_yes, m]));
-      const marketByNo = new Map(markets.map((m) => [m.token_id_no, m]));
+      // 3. Display enriched position info
+      console.log(chalk.bold(`\nPositions to sell (${positions.length}):\n`));
+      for (const pos of positions) {
+        const amount = ethers.utils.formatUnits(pos.balance, 6);
 
-      console.log(chalk.bold(`\nPositions to sell (${heldTokens.length}):\n`));
-      for (const { tokenId, balance } of heldTokens) {
-        const mYes = marketByYes.get(tokenId);
-        const mNo = marketByNo.get(tokenId);
-        const market = mYes ?? mNo;
-        const side = mYes ? "YES" : mNo ? "NO" : "?";
-        const label = market ? `${market.question.slice(0, 50)}... (${side})` : tokenId;
-        const amount = ethers.utils.formatUnits(balance, 6);
-        console.log(`  ${label}: ${amount} tokens`);
+        let label: string;
+        if (pos.title) {
+          const truncTitle = pos.title.length > 45 ? `${pos.title.slice(0, 45)}...` : pos.title;
+          const outcomePart = pos.outcome ? ` (${pos.outcome})` : "";
+          label = `${truncTitle}${outcomePart}`;
+        } else {
+          // Fall back to DB lookup
+          const markets = db.getMarkets();
+          const marketByYes = new Map(markets.map((m) => [m.token_id_yes, m]));
+          const marketByNo = new Map(markets.map((m) => [m.token_id_no, m]));
+          const mYes = marketByYes.get(pos.tokenId);
+          const mNo = marketByNo.get(pos.tokenId);
+          const market = mYes ?? mNo;
+          const side = mYes ? "YES" : mNo ? "NO" : "?";
+          label = market ? `${market.question.slice(0, 50)}... (${side})` : pos.tokenId;
+        }
+
+        const pricePart = pos.curPrice !== undefined ? ` @ $${pos.curPrice.toFixed(3)}` : "";
+        const redeemPart = pos.redeemable ? chalk.cyan(" [REDEEMABLE]") : "";
+        console.log(`  ${label}: ${amount} tokens${pricePart}${redeemPart}`);
       }
       console.log();
 
@@ -65,14 +74,17 @@ export const killallCommand = new Command("killall")
         return;
       }
 
-      // 5. Execute killall
+      // 5. Execute killall (passes API positions for enriched metadata + auto-redeem)
       const startTime = Date.now();
-      const result = await killAllPositions(auth.clobClient, auth.wallet, env, db);
+      const result = await killAllPositions(auth.clobClient, auth.wallet, env, db, positions);
       const elapsed = Date.now() - startTime;
 
       // 6. Display results
       console.log(chalk.bold(`\nResults (${elapsed}ms):`));
       console.log(`  Orders cancelled: ${result.cancelled}`);
+      if (result.redeemed > 0) {
+        console.log(chalk.cyan(`  Positions redeemed: ${result.redeemed}`));
+      }
       console.log(`  Positions sold: ${result.sold.length}`);
 
       for (const s of result.sold) {

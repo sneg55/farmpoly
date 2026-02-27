@@ -4,6 +4,7 @@ import type { ClobClient } from "@polymarket/clob-client";
 import type { EnvConfig } from "../utils/config.js";
 import type { PolyfarmDb, MarketRow } from "../db/database.js";
 import { CONDITIONAL_TOKENS, ERC1155_BALANCE_ABI } from "../contracts/addresses.js";
+import { fetchWalletPositions, type DataApiPosition } from "../api/positions-api.js";
 
 export interface OpenOrder {
   id: string;
@@ -187,6 +188,78 @@ export async function discoverHeldTokens(
   const balances = await getTokenBalances(wallet, env, tokenIds);
   const nonZero = balances.filter((b) => !b.balance.isZero());
   return nonZero;
+}
+
+/**
+ * Discover held tokens via the Polymarket Data API (single HTTP call).
+ * Returns the same TokenBalance[] shape as discoverHeldTokens() for backward compat,
+ * plus enriched DataApiPosition data for callers that need it.
+ */
+export async function discoverHeldTokensViaApi(
+  address: string,
+  baseUrl?: string,
+): Promise<{ balances: TokenBalance[]; positions: DataApiPosition[] }> {
+  const positions = await fetchWalletPositions(
+    address,
+    { sizeThreshold: 0 },
+    baseUrl,
+  );
+
+  const balances: TokenBalance[] = positions
+    .filter((p) => p.size > 0)
+    .map((p) => ({
+      tokenId: p.asset,
+      balance: ethers.utils.parseUnits(p.size.toFixed(6), 6),
+    }));
+
+  return { balances, positions };
+}
+
+export interface DiscoveredPosition {
+  tokenId: string;
+  balance: BigNumber;
+  conditionId?: string;
+  negRisk?: boolean;
+  redeemable?: boolean;
+  title?: string;
+  curPrice?: number;
+  outcome?: string;
+  oppositeAsset?: string;
+}
+
+/**
+ * Unified position discovery: tries Polymarket Data API first, falls back to RPC event scanning.
+ */
+export async function discoverPositions(
+  wallet: Wallet,
+  env: EnvConfig,
+): Promise<DiscoveredPosition[]> {
+  // Primary: Data API
+  try {
+    const { positions } = await discoverHeldTokensViaApi(wallet.address, env.dataApiUrl);
+    return positions
+      .filter((p) => p.size > 0)
+      .map((p) => ({
+        tokenId: p.asset,
+        balance: ethers.utils.parseUnits(p.size.toFixed(6), 6),
+        conditionId: p.conditionId,
+        negRisk: p.negativeRisk,
+        redeemable: p.redeemable,
+        title: p.title,
+        curPrice: p.curPrice,
+        outcome: p.outcome,
+        oppositeAsset: p.oppositeAsset,
+      }));
+  } catch (err) {
+    console.log(`  Data API unavailable, falling back to RPC scan: ${(err as Error).message?.slice(0, 100)}`);
+  }
+
+  // Fallback: RPC event scanning
+  const rpcBalances = await discoverHeldTokens(wallet, env);
+  return rpcBalances.map((b) => ({
+    tokenId: b.tokenId,
+    balance: b.balance,
+  }));
 }
 
 /**

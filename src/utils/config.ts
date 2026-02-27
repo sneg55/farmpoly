@@ -10,6 +10,7 @@ export interface EnvConfig {
   polygonRpcUrl: string;
   clobApiUrl: string;
   gammaApiUrl: string;
+  dataApiUrl: string;
 }
 
 function isGitTracked(filePath: string): boolean {
@@ -56,16 +57,19 @@ export function loadEnv(): EnvConfig {
   const rpcUrl = process.env.POLYGON_RPC_URL || "https://polygon-rpc.com";
   const clobUrl = process.env.CLOB_API_URL || "https://clob.polymarket.com";
   const gammaUrl = process.env.GAMMA_API_URL || "https://gamma-api.polymarket.com";
+  const dataApiUrl = process.env.POLYMARKET_DATA_API_URL || "https://data-api.polymarket.com";
 
   // Validate secure schemes for custom URLs
   if (process.env.POLYGON_RPC_URL) validateUrl(rpcUrl, "POLYGON_RPC_URL");
   if (process.env.CLOB_API_URL) validateUrl(clobUrl, "CLOB_API_URL");
   if (process.env.GAMMA_API_URL) validateUrl(gammaUrl, "GAMMA_API_URL");
+  if (process.env.POLYMARKET_DATA_API_URL) validateUrl(dataApiUrl, "POLYMARKET_DATA_API_URL");
 
   return {
     polygonPrivateKey: validatePrivateKey(rawKey),
     polygonRpcUrl: rpcUrl,
     clobApiUrl: clobUrl,
     gammaApiUrl: gammaUrl,
+    dataApiUrl,
   };
 }
