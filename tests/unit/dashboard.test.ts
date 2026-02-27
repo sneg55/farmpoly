@@ -357,10 +357,10 @@ describe("Dashboard Auth", () => {
   it("returns login page on GET / without token", async () => {
     const res = await fetch(`http://localhost:${port}/`);
     expect(res.status).toBe(200);
-    expect(res.body).toContain("Enter your dashboard token");
-    expect(res.body).toContain("Sign In");
+    expect(res.body).toContain("authenticate to continue");
+    expect(res.body).toContain("Connect");
     // Should NOT contain the main dashboard
-    expect(res.body).not.toContain("PANIC CANCEL ALL");
+    expect(res.body).not.toContain("Panic Cancel All");
   });
 
   it("returns 401 on GET /api/status without token", async () => {
@@ -393,7 +393,7 @@ describe("Dashboard Auth", () => {
       headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
     });
     expect(res.status).toBe(200);
-    expect(res.body).toContain("PANIC CANCEL ALL");
+    expect(res.body).toContain("Panic Cancel All");
     expect(res.body).toContain("PolyFarm");
   });
 

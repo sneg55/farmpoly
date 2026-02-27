@@ -5,33 +5,72 @@ export function loginHtml(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PolyFarm — Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
-  :root{--bg:#0a0e17;--surface:#131926;--border:#1e2a3a;--text:#e2e8f0;--dim:#64748b;--blue:#3b82f6;--red:#ef4444}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh}
-  .login-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;width:340px}
-  .login-box h1{font-size:1.3rem;margin-bottom:4px}
-  .login-box .sub{color:var(--dim);font-size:.85rem;margin-bottom:20px}
-  .login-box label{font-size:.8rem;color:var(--dim);display:block;margin-bottom:4px}
-  .login-box input{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
-    padding:10px 12px;border-radius:6px;font-size:.9rem;margin-bottom:16px;outline:none}
-  .login-box input:focus{border-color:var(--blue)}
-  .login-box button{width:100%;background:var(--blue);color:#fff;border:none;padding:10px;
-    border-radius:6px;font-weight:600;font-size:.9rem;cursor:pointer;transition:opacity .15s}
-  .login-box button:hover{opacity:.85}
-  .login-box button:disabled{opacity:.5;cursor:not-allowed}
-  .error{color:var(--red);font-size:.85rem;margin-bottom:12px;display:none}
+  :root{
+    --bg:#06080d;--surface:#0c1018;--border:#14192480;
+    --text:#c8d6e5;--dim:#4a5568;--accent:#00e5a0;--accent-dim:#00e5a020;
+    --red:#ff4757;--yellow:#ffa502;--blue:#3b82f6;
+    --glow:0 0 20px #00e5a030,0 0 60px #00e5a010;
+  }
+  body{
+    font-family:'DM Sans',sans-serif;
+    background:var(--bg);color:var(--text);
+    display:flex;align-items:center;justify-content:center;min-height:100vh;
+    position:relative;overflow:hidden;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;
+    background:
+      repeating-linear-gradient(0deg,transparent,transparent 2px,#00e5a003 2px,#00e5a003 4px),
+      radial-gradient(ellipse at 50% 0%,#00e5a008 0%,transparent 60%);
+    pointer-events:none;z-index:0;
+  }
+  .login-box{
+    background:var(--surface);border:1px solid var(--border);border-radius:2px;
+    padding:40px;width:380px;position:relative;z-index:1;
+    box-shadow:var(--glow),0 25px 50px #00000060;
+  }
+  .login-box::before{
+    content:'';position:absolute;top:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,transparent,var(--accent),transparent);
+  }
+  .brand{
+    font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;
+    color:var(--accent);letter-spacing:.15em;text-transform:uppercase;margin-bottom:4px;
+  }
+  .brand-dot{display:inline-block;width:8px;height:8px;background:var(--accent);
+    border-radius:1px;margin-right:8px;box-shadow:0 0 8px var(--accent)}
+  .login-box .sub{color:var(--dim);font-size:.8rem;margin-bottom:28px;font-family:'JetBrains Mono',monospace;letter-spacing:.02em}
+  .login-box label{font-size:.7rem;color:var(--dim);display:block;margin-bottom:6px;
+    font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.1em}
+  .login-box input{
+    width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+    padding:12px 14px;border-radius:2px;font-size:.9rem;margin-bottom:20px;outline:none;
+    font-family:'JetBrains Mono',monospace;transition:border-color .2s,box-shadow .2s;
+  }
+  .login-box input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+  .login-box button{
+    width:100%;background:var(--accent);color:var(--bg);border:none;padding:12px;
+    border-radius:2px;font-weight:700;font-size:.85rem;cursor:pointer;
+    font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.1em;
+    transition:all .15s;
+  }
+  .login-box button:hover{box-shadow:0 0 20px #00e5a040;transform:translateY(-1px)}
+  .login-box button:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+  .error{color:var(--red);font-size:.8rem;margin-bottom:12px;display:none;font-family:'JetBrains Mono',monospace}
 </style>
 </head>
 <body>
 <div class="login-box">
-  <h1>PolyFarm</h1>
-  <div class="sub">Enter your dashboard token to continue</div>
+  <div class="brand"><span class="brand-dot"></span>PolyFarm</div>
+  <div class="sub">// authenticate to continue</div>
   <div class="error" id="err"></div>
   <label for="token">Auth Token</label>
   <input type="password" id="token" placeholder="Enter token..." autofocus>
-  <button id="loginBtn" onclick="doLogin()">Sign In</button>
+  <button id="loginBtn" onclick="doLogin()">Connect</button>
 </div>
 <script>
 document.getElementById('token').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
@@ -40,13 +79,13 @@ async function doLogin(){
   const err=document.getElementById('err');
   const token=document.getElementById('token').value.trim();
   if(!token){err.textContent='Token is required';err.style.display='block';return}
-  btn.disabled=true;btn.textContent='Signing in...';err.style.display='none';
+  btn.disabled=true;btn.textContent='Connecting...';err.style.display='none';
   try{
     const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
     if(r.ok){window.location.reload()}
-    else{const d=await r.json();err.textContent=d.error||'Login failed';err.style.display='block'}
+    else{const d=await r.json();err.textContent=d.error||'Authentication failed';err.style.display='block'}
   }catch(e){err.textContent='Network error';err.style.display='block'}
-  finally{btn.disabled=false;btn.textContent='Sign In'}
+  finally{btn.disabled=false;btn.textContent='Connect'}
 }
 </script>
 </body>
@@ -60,135 +99,278 @@ export function dashboardHtml(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PolyFarm Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   :root{
-    --bg:#0a0e17;--surface:#131926;--border:#1e2a3a;
-    --text:#e2e8f0;--dim:#64748b;--green:#22c55e;--red:#ef4444;
-    --yellow:#eab308;--blue:#3b82f6;--purple:#a855f7;
+    --bg:#06080d;--surface:#0c1018;--surface2:#0f1420;
+    --border:#141924;--border-hi:#1e2a3a;
+    --text:#c8d6e5;--text-bright:#e8f0fe;--dim:#4a5568;--dim2:#2d3748;
+    --accent:#00e5a0;--accent-dim:#00e5a018;--accent-mid:#00e5a050;
+    --green:#00e5a0;--red:#ff4757;--yellow:#ffa502;--blue:#5b9bf5;--purple:#a78bfa;
+    --mono:'JetBrains Mono',monospace;--sans:'DM Sans',sans-serif;
+    --glow:0 0 20px #00e5a015;
   }
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    background:var(--bg);color:var(--text);padding:20px;max-width:1200px;margin:0 auto}
-  h1{font-size:1.5rem;margin-bottom:4px}
-  .subtitle{color:var(--dim);font-size:.85rem;margin-bottom:24px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px}
-  .card-label{font-size:.75rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
-  .card-value{font-size:1.6rem;font-weight:700;margin-top:4px}
-  .card-sub{font-size:.8rem;color:var(--dim);margin-top:2px}
-  .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-  .dot-running{background:var(--green);box-shadow:0 0 6px var(--green)}
-  .dot-stopped{background:var(--yellow)}
-  .dot-panic{background:var(--red);box-shadow:0 0 6px var(--red)}
-  .dot-none{background:var(--dim)}
-  table{width:100%;border-collapse:collapse;font-size:.85rem}
-  th{text-align:left;color:var(--dim);font-weight:500;padding:8px 12px;
-    border-bottom:1px solid var(--border);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
-  td{padding:8px 12px;border-bottom:1px solid var(--border)}
-  .side-buy{color:var(--green);font-weight:600}
-  .side-sell{color:var(--red);font-weight:600}
-  .section{margin-bottom:24px}
-  .section-title{font-size:1rem;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-  .badge{font-size:.7rem;background:var(--border);padding:2px 8px;border-radius:10px;color:var(--dim);font-weight:400}
-  .btn-panic{background:var(--red);color:#fff;border:none;padding:10px 24px;border-radius:8px;
-    font-weight:600;cursor:pointer;font-size:.9rem;transition:opacity .15s}
-  .btn-panic:hover{opacity:.85}
-  .btn-panic:disabled{opacity:.4;cursor:not-allowed}
-  .btn-logout{background:transparent;color:var(--dim);border:1px solid var(--border);padding:8px 16px;
-    border-radius:6px;cursor:pointer;font-size:.8rem;transition:all .15s}
+  body{
+    font-family:var(--sans);background:var(--bg);color:var(--text);
+    padding:0;margin:0;position:relative;min-height:100vh;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;
+    background:
+      repeating-linear-gradient(0deg,transparent,transparent 2px,#00e5a002 2px,#00e5a002 4px),
+      radial-gradient(ellipse at 30% 0%,#00e5a006 0%,transparent 50%),
+      radial-gradient(ellipse at 70% 100%,#5b9bf504 0%,transparent 50%);
+    pointer-events:none;z-index:0;
+  }
+  .container{max-width:1400px;margin:0 auto;padding:20px 24px;position:relative;z-index:1}
+
+  /* ── Header ── */
+  .header{
+    display:flex;justify-content:space-between;align-items:flex-start;
+    margin-bottom:28px;padding-bottom:20px;border-bottom:1px solid var(--border);
+  }
+  .brand{font-family:var(--mono);font-size:1.4rem;font-weight:700;color:var(--accent);
+    letter-spacing:.15em;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+  .brand-dot{width:8px;height:8px;background:var(--accent);border-radius:1px;box-shadow:0 0 10px var(--accent)}
+  .header-sub{
+    font-family:var(--mono);font-size:.7rem;color:var(--dim);margin-top:6px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .live-indicator{display:flex;align-items:center;gap:5px}
+  .live-ring{width:7px;height:7px;border-radius:50%;position:relative}
+  .live-ring::before{content:'';position:absolute;inset:-3px;border-radius:50%;
+    border:1px solid var(--accent);opacity:0;animation:ring-out 2s ease-out infinite}
+  .live-ring-inner{width:7px;height:7px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 6px var(--accent)}
+  @keyframes ring-out{0%{transform:scale(.5);opacity:.8}100%{transform:scale(2);opacity:0}}
+  .toolbar-right{display:flex;align-items:center;gap:10px}
+  .btn-logout{
+    background:transparent;color:var(--dim);border:1px solid var(--border);padding:7px 14px;
+    border-radius:2px;cursor:pointer;font-family:var(--mono);font-size:.7rem;
+    text-transform:uppercase;letter-spacing:.08em;transition:all .2s;
+  }
   .btn-logout:hover{border-color:var(--text);color:var(--text)}
-  .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
-  .toolbar-right{display:flex;align-items:center;gap:12px}
-  .live-dot{width:6px;height:6px;background:var(--green);border-radius:50%;display:inline-block;
-    margin-right:6px;animation:pulse 2s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-  .empty{color:var(--dim);padding:24px;text-align:center}
-  .scrollable{max-height:500px;overflow-y:auto}
-  .mono{font-family:'SF Mono',Menlo,monospace;font-size:.8rem}
-  .filter-row{display:flex;align-items:center;gap:12px;margin-bottom:8px}
-  .filter-input{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 12px;
-    border-radius:6px;font-size:.85rem;width:260px;outline:none}
-  .filter-input:focus{border-color:var(--blue)}
-  .page-controls{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:.8rem;color:var(--dim)}
-  .page-btn{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 10px;
-    border-radius:4px;cursor:pointer;font-size:.8rem}
-  .page-btn:hover{border-color:var(--blue)}
-  .page-btn:disabled{opacity:.3;cursor:not-allowed}
-  .pnl-pos{color:var(--green)}
-  .pnl-neg{color:var(--red)}
-  .pnl-zero{color:var(--dim)}
-  .progress-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
-  .progress-fill{height:100%;border-radius:2px;transition:width .5s}
-  .fill-blue{background:var(--blue)}
+  .btn-panic{
+    background:transparent;color:var(--red);border:1px solid #ff475730;padding:7px 14px;
+    border-radius:2px;font-weight:700;cursor:pointer;font-family:var(--mono);font-size:.7rem;
+    text-transform:uppercase;letter-spacing:.08em;transition:all .2s;
+  }
+  .btn-panic:hover{background:#ff475715;border-color:var(--red);box-shadow:0 0 20px #ff475720}
+  .btn-panic:disabled{opacity:.3;cursor:not-allowed;box-shadow:none;background:transparent}
+
+  /* ── Stat Cards ── */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1px;
+    margin-bottom:28px;background:var(--border);border-radius:3px;overflow:hidden;
+    box-shadow:var(--glow)}
+  .stat{background:var(--surface);padding:18px 20px;position:relative}
+  .stat::after{content:'';position:absolute;top:0;left:0;width:3px;height:100%;
+    background:var(--accent);opacity:0;transition:opacity .3s}
+  .stat:hover::after{opacity:1}
+  .stat-label{font-family:var(--mono);font-size:.6rem;color:var(--dim);text-transform:uppercase;
+    letter-spacing:.12em;margin-bottom:8px}
+  .stat-value{font-family:var(--mono);font-size:1.5rem;font-weight:700;color:var(--text-bright);
+    line-height:1}
+  .stat-sub{font-family:var(--mono);font-size:.65rem;color:var(--dim);margin-top:6px}
+  .stat-value.pnl-pos{color:var(--green)}
+  .stat-value.pnl-neg{color:var(--red)}
+  .stat-value.pnl-zero{color:var(--dim)}
+
+  /* Status badge */
+  .status-badge{
+    display:inline-flex;align-items:center;gap:6px;
+    font-family:var(--mono);font-size:.8rem;font-weight:700;text-transform:uppercase;
+    letter-spacing:.08em;padding:4px 10px;border-radius:2px;
+  }
+  .badge-running{color:var(--green);background:#00e5a010;border:1px solid #00e5a030}
+  .badge-stopped{color:var(--yellow);background:#ffa50210;border:1px solid #ffa50230}
+  .badge-panic{color:var(--red);background:#ff475710;border:1px solid #ff475730}
+  .badge-none{color:var(--dim);background:var(--surface2);border:1px solid var(--border)}
+  .badge-dot{width:6px;height:6px;border-radius:50%}
+  .badge-running .badge-dot{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .badge-stopped .badge-dot{background:var(--yellow)}
+  .badge-panic .badge-dot{background:var(--red);box-shadow:0 0 6px var(--red)}
+  .badge-none .badge-dot{background:var(--dim)}
+
+  /* Progress bar */
+  .progress-track{height:3px;background:var(--border);border-radius:1px;overflow:hidden;margin-top:8px}
+  .progress-fill{height:100%;border-radius:1px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+  .fill-accent{background:var(--accent)}
   .fill-green{background:var(--green)}
   .fill-yellow{background:var(--yellow)}
-  .two-sided{color:var(--green);font-weight:600}
-  .one-sided{color:var(--yellow)}
-  .toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--border);
-    padding:12px 20px;border-radius:8px;font-size:.85rem;opacity:0;transition:opacity .3s;pointer-events:none}
-  .toast.show{opacity:1}
+  .fill-blue{background:var(--blue)}
+
+  /* ── Sections ── */
+  .section{margin-bottom:24px}
+  .section-header{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:10px;padding:0 2px;
+  }
+  .section-title{
+    font-family:var(--mono);font-size:.7rem;color:var(--dim);
+    text-transform:uppercase;letter-spacing:.12em;display:flex;align-items:center;gap:8px;
+  }
+  .count-badge{
+    font-family:var(--mono);font-size:.6rem;color:var(--accent);
+    background:var(--accent-dim);padding:2px 7px;border-radius:2px;font-weight:500;
+  }
+
+  /* ── Tables ── */
+  .table-wrap{
+    background:var(--surface);border:1px solid var(--border);border-radius:3px;
+    overflow:hidden;box-shadow:var(--glow);
+  }
+  table{width:100%;border-collapse:collapse;font-size:.8rem}
+  th{
+    text-align:left;color:var(--dim);font-weight:500;padding:10px 14px;
+    border-bottom:1px solid var(--border);font-family:var(--mono);font-size:.6rem;
+    text-transform:uppercase;letter-spacing:.1em;background:var(--surface2);
+  }
+  td{padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:.75rem;transition:background .15s}
+  tr:last-child td{border-bottom:none}
+  tbody tr:hover td{background:#ffffff04}
+  .side-buy{color:var(--green);font-weight:600}
+  .side-sell{color:var(--red);font-weight:600}
+  .empty{color:var(--dim);padding:32px;text-align:center;font-family:var(--mono);font-size:.75rem;letter-spacing:.03em}
+  .mono{font-family:var(--mono);font-size:.7rem;color:var(--dim)}
+  .scrollable{max-height:500px;overflow-y:auto}
+
+  /* ── Two-sided / One-sided badges ── */
+  .two-sided{color:var(--green);font-weight:600;font-size:.65rem;
+    background:#00e5a010;padding:1px 5px;border-radius:2px}
+  .one-sided{color:var(--yellow);font-size:.65rem;
+    background:#ffa50210;padding:1px 5px;border-radius:2px}
+
+  /* ── Filter / Pagination ── */
+  .filter-row{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+  .filter-input{
+    background:var(--surface);border:1px solid var(--border);color:var(--text);
+    padding:8px 14px;border-radius:2px;font-family:var(--mono);font-size:.75rem;
+    width:300px;outline:none;transition:border-color .2s,box-shadow .2s;
+  }
+  .filter-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+  .filter-input::placeholder{color:var(--dim)}
+  .page-controls{
+    display:flex;align-items:center;gap:8px;padding:10px 14px;
+    background:var(--surface2);font-family:var(--mono);font-size:.65rem;color:var(--dim);
+    border-top:1px solid var(--border);
+  }
+  .page-btn{
+    background:var(--surface);border:1px solid var(--border);color:var(--text);
+    padding:4px 10px;border-radius:2px;cursor:pointer;font-family:var(--mono);font-size:.65rem;
+    transition:all .15s;
+  }
+  .page-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .page-btn:disabled{opacity:.2;cursor:not-allowed;border-color:var(--border);color:var(--dim)}
+
+  /* ── Toast ── */
+  .toast{
+    position:fixed;bottom:24px;right:24px;
+    background:var(--surface);border:1px solid var(--accent);
+    padding:12px 20px;border-radius:2px;font-family:var(--mono);font-size:.75rem;
+    color:var(--accent);box-shadow:0 0 30px #00e5a020;
+    opacity:0;transform:translateY(10px);transition:all .3s;pointer-events:none;
+  }
+  .toast.show{opacity:1;transform:translateY(0)}
+
+  /* ── Stale section warning ── */
+  .stale-warn .table-wrap{border-color:#ffa50230}
+  .stale-warn .section-title{color:var(--yellow)}
+  .stale-warn .count-badge{color:var(--yellow);background:#ffa50215}
+
+  /* ── Link styling ── */
+  a{color:var(--blue);text-decoration:none;transition:color .15s}
+  a:hover{color:var(--accent)}
+
+  /* ── Responsive ── */
+  @media(max-width:768px){
+    .container{padding:12px}
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .filter-input{width:100%}
+    .header{flex-direction:column;gap:12px}
+    .toolbar-right{width:100%;justify-content:flex-end}
+  }
+
+  /* ── Entry animation ── */
+  @keyframes fade-up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  .section,.stats{animation:fade-up .4s ease-out both}
+  .section:nth-child(2){animation-delay:.05s}
+  .section:nth-child(3){animation-delay:.1s}
+  .section:nth-child(4){animation-delay:.15s}
+  .section:nth-child(5){animation-delay:.2s}
+  .section:nth-child(6){animation-delay:.25s}
+  .section:nth-child(7){animation-delay:.3s}
 </style>
 </head>
 <body>
+<div class="container">
 
-<div class="toolbar">
+<div class="header">
   <div>
-    <h1>PolyFarm</h1>
-    <div class="subtitle"><span class="live-dot"></span>Dashboard auto-refreshes every 2s</div>
+    <div class="brand"><span class="brand-dot"></span>PolyFarm</div>
+    <div class="header-sub">
+      <span class="live-indicator">
+        <span class="live-ring"><span class="live-ring-inner"></span></span>
+        <span>Live &mdash; 2s refresh</span>
+      </span>
+    </div>
   </div>
   <div class="toolbar-right">
     <button class="btn-logout" onclick="doLogout()">Logout</button>
-    <button class="btn-panic" id="panicBtn" onclick="doPanic()">PANIC CANCEL ALL</button>
+    <button class="btn-panic" id="panicBtn" onclick="doPanic()">Panic Cancel All</button>
   </div>
 </div>
 
-<div class="grid" id="stats">
-  <div class="card">
-    <div class="card-label">Status</div>
-    <div class="card-value" id="s-status"><span class="status-dot dot-none"></span><span class="status-text">--</span></div>
+<div class="stats" id="stats">
+  <div class="stat">
+    <div class="stat-label">Status</div>
+    <div class="stat-value" id="s-status"><span class="status-badge badge-none"><span class="badge-dot"></span>--</span></div>
   </div>
-  <div class="card">
-    <div class="card-label">Budget</div>
-    <div class="card-value" id="s-budget">--</div>
-    <div class="card-sub" id="s-spread"></div>
+  <div class="stat">
+    <div class="stat-label">Budget</div>
+    <div class="stat-value" id="s-budget">--</div>
+    <div class="stat-sub" id="s-spread"></div>
   </div>
-  <div class="card">
-    <div class="card-label">Orders Placed</div>
-    <div class="card-value" id="s-placed">--</div>
+  <div class="stat">
+    <div class="stat-label">Orders Placed</div>
+    <div class="stat-value" id="s-placed">--</div>
   </div>
-  <div class="card">
-    <div class="card-label">Fill Rate</div>
-    <div class="card-value" id="s-fillrate">--</div>
-    <div class="progress-bar"><div class="progress-fill fill-blue" id="s-fillbar" style="width:0%"></div></div>
+  <div class="stat">
+    <div class="stat-label">Fill Rate</div>
+    <div class="stat-value" id="s-fillrate">--</div>
+    <div class="progress-track"><div class="progress-fill fill-accent" id="s-fillbar" style="width:0%"></div></div>
   </div>
-  <div class="card">
-    <div class="card-label">Cancelled</div>
-    <div class="card-value" id="s-cancelled">--</div>
+  <div class="stat">
+    <div class="stat-label">Cancelled</div>
+    <div class="stat-value" id="s-cancelled">--</div>
   </div>
-  <div class="card">
-    <div class="card-label">Markets</div>
-    <div class="card-value" id="s-markets">--</div>
+  <div class="stat">
+    <div class="stat-label">Markets</div>
+    <div class="stat-value" id="s-markets">--</div>
   </div>
-  <div class="card">
-    <div class="card-label">Realized P&L</div>
-    <div class="card-value" id="s-pnl">--</div>
-    <div class="card-sub" id="s-pnl-sub"></div>
+  <div class="stat">
+    <div class="stat-label">Realized P&L</div>
+    <div class="stat-value" id="s-pnl">--</div>
+    <div class="stat-sub" id="s-pnl-sub"></div>
   </div>
-  <div class="card">
-    <div class="card-label">Inventory Exposure</div>
-    <div class="card-value" id="s-inventory">--</div>
-    <div class="card-sub" id="s-inventory-sub"></div>
+  <div class="stat">
+    <div class="stat-label">Inventory Exposure</div>
+    <div class="stat-value" id="s-inventory">--</div>
+    <div class="stat-sub" id="s-inventory-sub"></div>
   </div>
-  <div class="card">
-    <div class="card-label">Est. Daily Rewards</div>
-    <div class="card-value" id="s-rewards">--</div>
-    <div class="card-sub" id="s-rewards-sub"></div>
+  <div class="stat">
+    <div class="stat-label">Est. Daily Rewards</div>
+    <div class="stat-value" id="s-rewards">--</div>
+    <div class="stat-sub" id="s-rewards-sub"></div>
   </div>
 </div>
 
 <div class="section">
-  <div class="section-title">Live Orders <span class="badge" id="live-count">0</span></div>
-  <div class="card" style="padding:0;overflow-x:auto">
+  <div class="section-header">
+    <div class="section-title">Live Orders <span class="count-badge" id="live-count">0</span></div>
+  </div>
+  <div class="table-wrap">
     <table>
       <thead>
         <tr><th>ID</th><th>Market</th><th>Side</th><th>Price</th><th>Size</th><th>Type</th><th>Placed</th></tr>
@@ -201,8 +383,10 @@ export function dashboardHtml(): string {
 </div>
 
 <div class="section">
-  <div class="section-title">Position Exposure <span class="badge" id="inv-count">0</span></div>
-  <div class="card" style="padding:0;overflow-x:auto">
+  <div class="section-header">
+    <div class="section-title">Position Exposure <span class="count-badge" id="inv-count">0</span></div>
+  </div>
+  <div class="table-wrap">
     <table>
       <thead>
         <tr><th>Market</th><th>Side</th><th>Minted</th><th>Current</th><th>Status</th></tr>
@@ -214,9 +398,11 @@ export function dashboardHtml(): string {
   </div>
 </div>
 
-<div class="section" id="stale-section" style="display:none">
-  <div class="section-title" style="color:var(--yellow)">Stale Positions <span class="badge" id="stale-count">0</span></div>
-  <div class="card" style="padding:0;overflow-x:auto">
+<div class="section stale-warn" id="stale-section" style="display:none">
+  <div class="section-header">
+    <div class="section-title">Stale Positions <span class="count-badge" id="stale-count">0</span></div>
+  </div>
+  <div class="table-wrap">
     <table>
       <thead>
         <tr><th>Market</th><th>Side</th><th>Balance</th><th>Est. Value</th><th>Action</th></tr>
@@ -229,15 +415,17 @@ export function dashboardHtml(): string {
 </div>
 
 <div class="section">
-  <div class="section-title">Markets <span class="badge" id="mkt-count">0</span></div>
-  <div class="filter-row">
-    <input class="filter-input" id="mkt-filter" type="text" placeholder="Filter markets...">
-    <span style="color:var(--dim);font-size:.8rem" id="mkt-showing"></span>
+  <div class="section-header">
+    <div class="section-title">Markets <span class="count-badge" id="mkt-count">0</span></div>
   </div>
-  <div class="card" style="padding:0;overflow-x:auto">
+  <div class="filter-row">
+    <input class="filter-input" id="mkt-filter" type="text" placeholder="// filter markets...">
+    <span style="color:var(--dim);font-family:var(--mono);font-size:.65rem" id="mkt-showing"></span>
+  </div>
+  <div class="table-wrap">
     <div class="scrollable">
       <table>
-        <thead style="position:sticky;top:0;background:var(--surface);z-index:1">
+        <thead style="position:sticky;top:0;background:var(--surface2);z-index:1">
           <tr><th>Question</th><th>Midpoint</th><th>TVL</th><th>Reward/day</th><th>Spread Quality</th><th>Book Share</th><th>Tick</th></tr>
         </thead>
         <tbody id="markets-body">
@@ -254,8 +442,10 @@ export function dashboardHtml(): string {
 </div>
 
 <div class="section">
-  <div class="section-title">Hedge History <span class="badge" id="hedge-count">0</span></div>
-  <div class="card" style="padding:0;overflow-x:auto">
+  <div class="section-header">
+    <div class="section-title">Hedge History <span class="count-badge" id="hedge-count">0</span></div>
+  </div>
+  <div class="table-wrap">
     <div class="scrollable">
       <table>
         <thead>
@@ -270,8 +460,10 @@ export function dashboardHtml(): string {
 </div>
 
 <div class="section">
-  <div class="section-title">Recent Activity <span class="badge" id="activity-count">0</span></div>
-  <div class="card" style="padding:0;overflow-x:auto">
+  <div class="section-header">
+    <div class="section-title">Recent Activity <span class="count-badge" id="activity-count">0</span></div>
+  </div>
+  <div class="table-wrap">
     <table>
       <thead>
         <tr><th>ID</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Time</th></tr>
@@ -283,6 +475,8 @@ export function dashboardHtml(): string {
   </div>
 </div>
 
+</div><!-- .container -->
+
 <div id="toast" class="toast"></div>
 
 <script>
@@ -293,7 +487,7 @@ function fmtTime(ts){if(!ts)return'--';const d=new Date(ts*1000);return d.toLoca
 function shortId(id){return id?id.slice(0,10)+'..':'--'}
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms)}
 function esc(s){const d=document.createElement('div');d.textContent=String(s);return d.innerHTML}
-function truncQ(q){const s=String(q);return s.length>50?s.slice(0,48)+'..':s}
+function truncQ(q){const s=String(q);return s.length>55?s.slice(0,53)+'..':s}
 function pnlClass(cents){return cents>0?'pnl-pos':cents<0?'pnl-neg':'pnl-zero'}
 function hedgeStatusClass(s){if(s==='HEDGED')return'pnl-pos';if(s==='HEDGE_FAILED'||s==='MERGE_FAILED')return'pnl-neg';return'pnl-zero'}
 
@@ -319,14 +513,14 @@ function renderMarkets(){
     mb.innerHTML=page.map(m=>{
       const rs=rewardMap.get(m.condition_id);
       const quality=rs?fmt(rs.spreadQuality*100,0)+'%':'--';
-      const qualityBar=rs?'<div class="progress-bar"><div class="progress-fill fill-green" style="width:'+Math.round(rs.spreadQuality*100)+'%"></div></div>':'';
+      const qualityBar=rs?'<div class="progress-track" style="margin-top:4px"><div class="progress-fill fill-green" style="width:'+Math.round(rs.spreadQuality*100)+'%"></div></div>':'';
       const share=rs?fmt(rs.bookShare,1)+'%':'--';
       const twoSided=rs?(rs.isTwoSided?'<span class="two-sided">2x</span>':'<span class="one-sided">1x</span>'):'';
       const qHtml = m.slug
-        ? '<a href="https://polymarket.com/event/'+esc(m.slug)+'" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">'+esc(truncQ(m.question))+'</a>'
+        ? '<a href="https://polymarket.com/event/'+esc(m.slug)+'" target="_blank" rel="noopener">'+esc(truncQ(m.question))+'</a>'
         : esc(truncQ(m.question));
       return '<tr>'+
-        '<td>'+qHtml+'</td>'+
+        '<td style="max-width:280px">'+qHtml+'</td>'+
         '<td>'+fmt(m.midpoint)+'</td>'+
         '<td>'+fmtUsd(m.tvl)+'</td>'+
         '<td>$'+fmt(m.reward_rate)+' '+twoSided+'</td>'+
@@ -336,7 +530,7 @@ function renderMarkets(){
         '</tr>'}).join('');
   }
   document.getElementById('mkt-page-info').textContent=
-    'Page '+(mktPageNum+1)+' of '+totalPages+' ('+filtered.length+' markets)';
+    'Page '+(mktPageNum+1)+' / '+totalPages+' ('+filtered.length+' markets)';
   document.getElementById('mkt-prev').disabled=mktPageNum===0;
   document.getElementById('mkt-next').disabled=mktPageNum>=totalPages-1;
 }
@@ -351,14 +545,9 @@ async function refresh(){
     const s=d.session;
     const VALID_STATUSES=['RUNNING','STOPPED','PANIC'];
     const statusText=s&&VALID_STATUSES.includes(s.status)?s.status:'NO SESSION';
-    const dotClass=s&&VALID_STATUSES.includes(s.status)?('dot-'+s.status.toLowerCase()):'dot-none';
-    const sEl=document.getElementById('s-status');
-    const dot=sEl.querySelector('.status-dot')||document.createElement('span');
-    dot.className='status-dot '+dotClass;
-    if(!sEl.querySelector('.status-dot'))sEl.prepend(dot);
-    const txt=sEl.querySelector('.status-text')||document.createElement('span');
-    txt.className='status-text';txt.textContent=statusText;
-    if(!sEl.querySelector('.status-text'))sEl.appendChild(txt);
+    const badgeClass=s&&VALID_STATUSES.includes(s.status)?('badge-'+s.status.toLowerCase()):'badge-none';
+    document.getElementById('s-status').innerHTML=
+      '<span class="status-badge '+badgeClass+'"><span class="badge-dot"></span>'+statusText+'</span>';
     document.getElementById('s-budget').textContent=s?('$'+fmt(s.budget_usdc)):'--';
     document.getElementById('s-spread').textContent=s?(s.spread_cents+'c spread'):'';
     document.getElementById('s-placed').textContent=s?s.orders_placed:'0';
@@ -374,7 +563,7 @@ async function refresh(){
     const pnlCents=pnl.realizedCents||0;
     const pnlEl=document.getElementById('s-pnl');
     pnlEl.textContent=fmtCents(pnlCents);
-    pnlEl.className='card-value '+pnlClass(pnlCents);
+    pnlEl.className='stat-value '+pnlClass(pnlCents);
     document.getElementById('s-pnl-sub').textContent=
       (pnl.totalHedged||0)+' hedged, '+(pnl.totalFailed||0)+' failed';
 
@@ -404,7 +593,7 @@ async function refresh(){
     } else {
       ob.innerHTML=orders.map(o=>'<tr>'+
         '<td class="mono">'+esc(shortId(o.order_id))+'</td>'+
-        '<td>'+esc(shortId(o.condition_id))+'</td>'+
+        '<td class="mono">'+esc(shortId(o.condition_id))+'</td>'+
         '<td class="side-'+(o.side==='BUY'?'buy':'sell')+'">'+esc(o.side)+'</td>'+
         '<td>'+fmt(o.price)+'</td>'+
         '<td>'+fmt(o.size,1)+'</td>'+
@@ -442,7 +631,7 @@ async function refresh(){
       document.getElementById('stale-body').innerHTML=stale.map(p=>{
         const actionColor=p.suggestedAction==='merge'?'pnl-pos':'pnl-zero';
         return '<tr>'+
-          '<td>'+esc(truncQ(p.question))+'</td>'+
+          '<td style="max-width:280px">'+esc(truncQ(p.question))+'</td>'+
           '<td class="side-'+(p.side==='YES'?'buy':'sell')+'">'+esc(p.side)+'</td>'+
           '<td>'+fmt(p.balance,1)+'</td>'+
           '<td>$'+fmt(p.estimatedValue)+'</td>'+
@@ -452,15 +641,11 @@ async function refresh(){
       staleSec.style.display='none';
     }
 
-    // Markets — update data, re-render if count changed or first load
+    // Markets — update data, re-render
     const mkts=d.markets||[];
     document.getElementById('mkt-count').textContent=mkts.length;
     document.getElementById('s-markets').textContent=mkts.length;
-    if(mkts.length!==allMarkets.length||allMarkets.length===0){
-      allMarkets=mkts;
-    } else {
-      allMarkets=mkts;
-    }
+    allMarkets=mkts;
     renderMarkets();
 
     // Hedge history
@@ -503,14 +688,14 @@ async function refresh(){
 async function doPanic(){
   if(!confirm('Cancel ALL orders immediately?'))return;
   const btn=document.getElementById('panicBtn');
-  btn.disabled=true;btn.textContent='CANCELLING...';
+  btn.disabled=true;btn.textContent='Cancelling...';
   try{
     const r=await fetch('/api/panic',{method:'POST'});
     const d=await r.json();
     toast('Cancelled '+d.cancelled+' orders');
     refresh();
   }catch(e){toast('Panic failed: '+e.message)}
-  finally{btn.disabled=false;btn.textContent='PANIC CANCEL ALL'}
+  finally{btn.disabled=false;btn.textContent='Panic Cancel All'}
 }
 
 async function doLogout(){
