@@ -21,6 +21,7 @@ import { FillDetector, type FillEvent } from "../../hedge/detector.js";
 import { executeHedge } from "../../hedge/executor.js";
 import { getTokenBalances } from "../../positions/fetcher.js";
 import { mergePositions } from "../../hedge/merger.js";
+import { checkApproval } from "../../auth/approval.js";
 import { ethers } from "ethers";
 import type { ClobClient } from "@polymarket/clob-client";
 
@@ -106,6 +107,25 @@ export const runCommand = new Command("run")
       // Auth
       const auth = await deriveOrLoadCreds(env, db);
       console.log(chalk.green(`Authenticated as ${auth.wallet.address}\n`));
+
+      // Check USDC approvals for minting contracts
+      if (mintEnabled) {
+        try {
+          const approvalStatus = await checkApproval(auth.wallet, env);
+          if (approvalStatus.needsConditionalTokensApproval || approvalStatus.needsNegRiskAdapterApproval) {
+            console.log(chalk.yellow("WARNING: USDC not approved for minting contracts. Run 'polyfarm init --approve' first."));
+            if (approvalStatus.needsConditionalTokensApproval) {
+              console.log(chalk.yellow("  Missing: ConditionalTokens USDC allowance"));
+            }
+            if (approvalStatus.needsNegRiskAdapterApproval) {
+              console.log(chalk.yellow("  Missing: NegRiskAdapter USDC allowance"));
+            }
+            console.log(chalk.yellow("  Minting will fail — falling back to BID-only for all markets.\n"));
+          }
+        } catch (err) {
+          console.log(chalk.yellow(`Warning: could not check minting approvals: ${(err as Error).message}\n`));
+        }
+      }
 
       // Clean up stale orders from previous sessions to free locked collateral
       const staleOrders = db.getLiveOrders();

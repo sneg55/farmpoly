@@ -21,7 +21,7 @@ async function getGasOverrides(provider: ethers.providers.JsonRpcProvider) {
       : minTip;
   const baseFee = feeData.lastBaseFeePerGas ?? ethers.utils.parseUnits("30", "gwei");
   const maxFeePerGas = baseFee.mul(2).add(maxPriorityFeePerGas);
-  return { maxPriorityFeePerGas, maxFeePerGas };
+  return { maxPriorityFeePerGas, maxFeePerGas, gasLimit: 500_000 };
 }
 
 /**
@@ -50,10 +50,6 @@ export async function splitPosition(
 
   if (negRisk) {
     const adapter = new Contract(NEG_RISK_ADAPTER, NEG_RISK_SPLIT_ABI, signer);
-
-    // Preflight check
-    await adapter.estimateGas.splitPosition(conditionId, amount, gasOverrides);
-
     const tx = await adapter.splitPosition(conditionId, amount, gasOverrides);
     await tx.wait();
     return tx.hash;
@@ -63,11 +59,6 @@ export async function splitPosition(
   const ctf = new Contract(CONDITIONAL_TOKENS, CTF_SPLIT_ABI, signer);
   const parentCollectionId = ethers.constants.HashZero;
   const indexSets = [1, 2];
-
-  // Preflight check
-  await ctf.estimateGas.splitPosition(
-    USDC_ADDRESS, parentCollectionId, conditionId, indexSets, amount, gasOverrides,
-  );
 
   const tx = await ctf.splitPosition(
     USDC_ADDRESS, parentCollectionId, conditionId, indexSets, amount, gasOverrides,

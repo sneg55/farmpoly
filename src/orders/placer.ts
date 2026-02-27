@@ -247,27 +247,24 @@ export async function placeOrdersForMarkets(
       try {
         // Mint-before-ASK: split USDC into YES+NO tokens if minting is enabled
         if (mintOptions?.enabled) {
-          // The split amount in USDC = askSize tokens (each YES+NO pair costs $1 USDC)
-          // We need askSize tokens worth of YES to sell. Split costs askSize USDC (6 decimals).
-          // But wait — USDC per share is $1 for a full pair, so askSize shares = askSize USDC to split.
-          // However, the budget check above uses askCost = (1-price)*askSize, which is the collateral
-          // needed without minting. With minting, we lock askSize USDC total but get YES+NO.
-          // The actual cost stays askCost because the NO tokens have value and offset.
-          const splitAmountUsdc = askCost; // Split enough USDC to cover the collateral cost
           try {
             // Check on-chain YES balance first
             const balances = await getTokenBalances(mintOptions.wallet, mintOptions.env, [market.tokenIdYes]);
             const onChainYes = balances.length > 0 ? Number(balances[0].balance) / 1e6 : 0;
-            const deficit = askSize - onChainYes;
+            const deficitShares = askSize - onChainYes;
 
-            if (deficit > 0) {
-              console.log(`  Minting: splitting $${deficit.toFixed(2)} USDC → YES+NO tokens`);
+            // Cap split at budget-allowed askCost to avoid over-minting beyond what the wallet can afford.
+            // Each YES+NO pair costs $1 USDC, but we only need askCost worth of exposure.
+            const splitUsdc = Math.min(deficitShares, askCost);
+
+            if (splitUsdc > 0) {
+              console.log(`  Minting [${market.negRisk ? 'NegRisk' : 'CTF'}]: splitting $${splitUsdc.toFixed(2)} USDC → YES+NO tokens`);
               await splitPosition(
                 mintOptions.wallet,
                 mintOptions.env,
                 market.conditionId,
                 market.negRisk,
-                deficit,
+                splitUsdc,
               );
 
               // Record NO tokens in inventory
@@ -276,8 +273,8 @@ export async function placeOrdersForMarkets(
                 condition_id: market.conditionId,
                 token_id: market.tokenIdNo,
                 side: "NO",
-                minted_amount: deficit,
-                current_balance: deficit,
+                minted_amount: splitUsdc,
+                current_balance: splitUsdc,
               });
               // Record YES tokens too (they'll be consumed by ASK)
               db.upsertInventory({
@@ -285,13 +282,13 @@ export async function placeOrdersForMarkets(
                 condition_id: market.conditionId,
                 token_id: market.tokenIdYes,
                 side: "YES",
-                minted_amount: deficit,
-                current_balance: deficit,
+                minted_amount: splitUsdc,
+                current_balance: splitUsdc,
               });
             }
           } catch (splitErr) {
             const msg = (splitErr as Error).message || String(splitErr);
-            console.log(`  Mint failed (falling back to BID-only): ${msg.slice(0, 80)}`);
+            console.log(`  Mint failed [${market.negRisk ? 'NegRisk' : 'CTF'}] (falling back to BID-only): ${msg.slice(0, 200)}`);
             continue; // skip ASK for this market
           }
         }
