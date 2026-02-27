@@ -2,7 +2,7 @@
 
 > **Stack**: Node 22, TypeScript, pnpm, better-sqlite3, Commander.js, ethers v5 (via SDK)
 > **Testing**: TDD (vitest, 165 tests) | **Mode**: Solo | **Created**: 2026-02-23
-> **Archive**: Phases 0-12 (all DONE) archived to `.claude/memory/archive/Plans-phases-0-12.md`
+> **Archive**: Phases 0-12 → `.claude/memory/archive/Plans-phases-0-12.md` | Phase 15 → `.claude/memory/archive/Plans-phase-15.md`
 
 ## Status: Production (Helsinki VPS)
 
@@ -10,182 +10,88 @@ Phases 0-14 complete. Two-sided liquidity (mint-and-quote) deployed.
 
 ---
 
-## Phase 15: Enhanced Monitoring Dashboard + Remote Auth
+## Phase 16: Unwind Accumulated Positions + Prevent Future Accumulation
 
 ### Context
 
-The existing dashboard (`src/dashboard/`) is a basic read-only monitor showing session stats, live orders, markets, and recent activity. It uses raw Node.js HTTP server with SSE (2s refresh), bound to `127.0.0.1:3737`.
+Portfolio screenshot shows $566.68 in accumulated positions across 11 entries. Three categories:
+- **Resolved markets** ($290): Meteora No @$1, Another company No @$1, ZachXBT Yes @$1
+- **Paired positions** (~$27 mergeable): US strikes Iran has both YES+NO for same markets
+- **One-sided directional** (~$250): Talarico (partial pair), Elon Musk Yes, Lagarde Yes
 
-**What's missing for production monitoring:**
-- No P&L tracking — can't see if the bot is profitable
-- No reward estimation — can't see expected earnings
-- No position/inventory exposure view
-- No spread quality or competitor metrics
-- Localhost-only — can't check from phone/laptop
-- No auth on read endpoints — unsafe to expose publicly
+### Root Causes
 
-### Feature Priority Matrix
+1. **ASK fills return "HEDGED" without merging** — `executor.ts:122-142` holds NO tokens, relying on a future BID fill that may never come. Capital locked indefinitely.
+2. **No periodic inventory sweep** — Merges only happen on BID fill, rebalance, or graceful shutdown. Docker `--restart on-failure` sends SIGKILL (not SIGTERM), skipping shutdown merge.
+3. **Resolved markets never auto-redeemed** — Tokens at $1.00 sit in wallet earning nothing.
+4. **`mergeInventory()` is session-scoped** — Only merges current session's inventory. Positions orphaned by restarts are invisible.
 
-| Priority | Feature |
-|----------|---------|
-| **Required** | Full auth (token-gated ALL endpoints for remote access) |
-| **Required** | Real-time P&L (realized from hedges + unrealized inventory) |
-| **Required** | Estimated daily reward earnings |
-| **Required** | Position exposure by market (inventory view) |
-| **Required** | Expose dashboard outside container (Docker + host binding) |
-| **Recommended** | Spread quality score per market |
-| **Recommended** | Competitor analysis (your share of book depth) |
-| **Recommended** | Hedge history table |
+### Priority Matrix
+
+| Priority | Task | Impact | Effort |
+|----------|------|--------|--------|
+| **Required** | 16.1 Redeem resolved markets (ops) | $290 recovery | CLI command |
+| **Required** | 16.2 Merge/sell remaining positions (ops) | ~$130 recovery | CLI commands |
+| **Required** | 16.3 Periodic inventory sweep | Prevents accumulation | Medium |
+| **Required** | 16.4 Session-agnostic shutdown merge | Catches orphaned positions | Small |
+| **Recommended** | 16.5 ASK fill NO-token timeout + sell | Reduces capital lockup | Medium |
+| **Recommended** | 16.6 Auto-redeem resolved markets | Frees dead capital | Small |
+| **Optional** | 16.7 Dashboard stale inventory warning | Better visibility | Small |
 
 ### Tasks
 
-- [x] 15.1 Full auth on all endpoints + cookie-based login page `[feature:security]`
-- [x] 15.2 Enhance API payload (hedges, inventory, pnlSummary, rewardScores)
-- [x] 15.3 P&L summary cards (realized, unrealized, est. daily rewards)
-- [x] 15.4 Position exposure table (inventory by market)
-- [x] 15.5 Hedge history table (fill → hedge → merge → P&L)
-- [x] 15.6 Spread quality + competitor share columns in Markets table
-- [x] 15.7 Docker exposure + env var config (host/port/token)
-- [x] 15.8 Unit tests for auth, payload, P&L calculation
+- [x] 16.1 Redeem resolved markets `[ops]`
+  - Ran on VPS: all previously resolved markets already redeemed. 2 remaining markets unresolved.
 
-### 15.1 Full auth on all endpoints + cookie-based login page `[feature:security]`
+- [x] 16.2 Merge/sell remaining one-sided positions `[ops]`
+  - Stopped bot gracefully (triggered shutdown merge), ran killall — 0 tokens remaining.
+  - Previous positions (Meteora, ZachXBT, etc.) already cleaned up.
 
-Currently auth only protects `/api/panic`. For remote access, ALL endpoints must require auth.
+- [x] 16.3 Add periodic inventory sweep to run loop `[feature:tdd]`
+  **File**: `src/cli/commands/run.ts`
+  - New interval every 10 min: `INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000`
+  - Uses `discoverHeldTokens()` for session-agnostic on-chain scanning
+  - Merges paired YES+NO, auto-redeems resolved, sells stale NO tokens
+  - Logs recovered USDC, clears interval on shutdown
 
-**Files**: `src/dashboard/server.ts`, `src/dashboard/html.ts`, `src/cli/commands/dashboard.ts`
+- [x] 16.4 Make shutdown merge session-agnostic `[bugfix:reproduce-first]`
+  **File**: `src/cli/commands/run.ts`
+  - Replaced `mergeInventory()` with `performInventorySweep()` in shutdown + rebalance
+  - Scans ALL on-chain balances, not just current session's DB inventory
+  - Ensures crash-orphaned positions from any session get merged
 
-**Server changes** (`server.ts`):
-- Move `isAuthorized()` check to top of request handler (before routing)
-- Accept auth via `Authorization: Bearer <token>` header OR `polyfarm_token` cookie
-- Add `POST /api/login` endpoint: validates token → sets `Set-Cookie: polyfarm_token=<token>; HttpOnly; SameSite=Strict; Path=/`
-- Add `POST /api/logout` endpoint: clears cookie
-- For unauthenticated `GET /`: serve login page instead of dashboard
-- For unauthenticated API calls: return 401 JSON
+- [x] 16.5 Add NO-token timeout: sell unsold NO after ASK fill `[feature:tdd]`
+  **File**: `src/cli/commands/run.ts`
+  - On ASK fill with no merge: records timestamp in `noTokenTimestamps` map
+  - On BID fill with merge: clears timestamp
+  - In inventory sweep: sells NO tokens held >15 min via FAK market order
 
-**HTML changes** (`html.ts`):
-- New `loginHtml()` function returning a standalone login page (same dark theme)
-- Simple form: token input + submit button
-- On submit: POST `/api/login`, on success reload page
+- [x] 16.6 Auto-redeem resolved markets during sweep `[feature:tdd]`
+  **File**: `src/positions/auto-redeemer.ts` (new), called from sweep
+  - During periodic sweep, attempts `redeemPosition()` on all held tokens
+  - Uses existing `estimateGas` preflight to skip unresolved markets
+  - Logs: "Auto-redeemed $X.XX from [market]"
 
-**CLI changes** (`dashboard.ts`):
-- Add `--auth-token <token>` option
-- Fallback: `process.env.POLYFARM_DASHBOARD_TOKEN`
-- Pass to `startDashboard({ authToken })`
-- Warn if `--host 0.0.0.0` without `--auth-token`
-
-### 15.2 Enhance API payload with P&L, hedges, inventory, reward scores
-
-**File**: `src/dashboard/server.ts`
-
-**Enhanced `freshPayload()` adds**:
-```
-hedges[]         – db.getRecentHedges(50)
-inventory[]      – db.getSessionInventory(sessionId)
-pnlSummary {
-  realizedCents  – sum of hedges.pnl_cents where status=HEDGED
-  totalHedged    – count of HEDGED
-  totalFailed    – count of HEDGE_FAILED + MERGE_FAILED
-  inventoryCount – number of markets with inventory
-  inventoryUsdc  – sum of inventory current_balance
-}
-rewardScores[] {
-  conditionId, question,
-  rewardRate, spreadQuality,
-  isTwoSided, estimatedDaily,
-  bookShare
-}
-```
-
-Compute P&L summary and reward scores server-side. All from DB reads (prepared stmts, sub-ms).
-
-### 15.3 P&L summary cards
-
-**File**: `src/dashboard/html.ts`
-
-Add 3 new metric cards after existing 6:
-- **Realized P&L**: Sum of hedge P&L → `$X.XX` with green/red color
-- **Inventory Exposure**: USDC locked in minted tokens → `$X.XX`
-- **Est. Daily Rewards**: Sum across active markets → `$X.XX/day`
-
-### 15.4 Position exposure table
-
-**File**: `src/dashboard/html.ts`
-
-New section "Position Exposure" below Live Orders:
-- Columns: Market, Side (YES/NO), Minted, Current, Status
-- Color: green = hedgeable, yellow = directional, dim = consumed
-
-### 15.5 Hedge history table
-
-**File**: `src/dashboard/html.ts`
-
-New section "Hedge History":
-- Columns: Time, Fill Side, Fill Price, Hedge Price, Merge Amt, P&L, Status
-- Color: green = HEDGED+profit, red = failed, dim = skipped
-
-### 15.6 Spread quality + competitor share
-
-**Files**: `src/dashboard/server.ts`, `src/dashboard/html.ts`
-
-**Spread quality** (new column in Markets table):
-- `quality = 1 - (effectiveSpread / maxSpread)^2`
-- Visual: percentage with bar
-
-**Competitor share** (new column in Markets table):
-- `share = totalOrderSize / marketTVL × 100`
-- Shows `X.X%` — higher = more rewards but more fill risk
-
-Computed server-side by joining live orders with markets in `freshPayload()`.
-
-### 15.7 Docker exposure + env var config
-
-**Files**: `Dockerfile`, `src/cli/commands/dashboard.ts`
-
-**Dockerfile**: Add `EXPOSE 3737`
-
-**CLI env fallbacks**:
-- `POLYFARM_DASHBOARD_HOST` → `--host` (default: 127.0.0.1)
-- `POLYFARM_DASHBOARD_PORT` → `--port` (default: 3737)
-- `POLYFARM_DASHBOARD_TOKEN` → `--auth-token`
-
-**Docker usage**:
-```bash
-docker run -p 3737:3737 \
-  -e POLYFARM_DASHBOARD_TOKEN=mysecrettoken \
-  -e POLYFARM_DASHBOARD_HOST=0.0.0.0 \
-  polyfarm dashboard
-```
-
-### 15.8 Unit tests
-
-**File**: `tests/unit/dashboard.test.ts`
-
-New test cases:
-- Auth: 401 on GET `/` without token when configured
-- Auth: 401 on GET `/api/status` without token
-- Auth: 200 with valid Bearer header
-- Auth: 200 with valid cookie
-- Auth: POST `/api/login` returns cookie on valid token
-- Auth: POST `/api/login` returns 401 on invalid token
-- Payload: `/api/status` includes `hedges`, `inventory`, `pnlSummary`, `rewardScores`
-- P&L: `pnlSummary.realizedCents` sums hedge P&L correctly with test data
-- Reward scores: calculated from markets + live orders
+- [x] 16.7 Dashboard stale inventory warning `[optional]`
+  **Files**: `src/dashboard/html.ts`, `src/dashboard/server.ts`
+  - New "Stale Positions" section (hidden when empty)
+  - Columns: Market, Side, Balance, Est. Value, Suggested Action (merge/sell)
+  - Server computes stale = inventory not in currently quoted markets
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
-| `src/dashboard/server.ts` | Full auth middleware, login/logout, enhanced payload |
-| `src/dashboard/html.ts` | Login page, P&L cards, exposure table, hedge table, quality columns |
-| `src/cli/commands/dashboard.ts` | `--auth-token`, env var fallbacks, security warning |
-| `Dockerfile` | `EXPOSE 3737` |
-| `tests/unit/dashboard.test.ts` | Auth + payload + P&L tests |
+| `src/cli/commands/run.ts` | Periodic sweep interval, session-agnostic shutdown merge |
+| `src/hedge/executor.ts` | NO-token timeout tracking |
+| `src/positions/auto-redeemer.ts` | New: auto-redeem during sweep |
+| `tests/unit/sweep.test.ts` | New: tests for inventory sweep + auto-redeem |
 
 ### Verification
 
 1. `npx tsc --noEmit` + `npx vitest run` — clean compile, all tests pass
-2. Local: `POLYFARM_DASHBOARD_TOKEN=test123 polyfarm dashboard --host 0.0.0.0` → login page → full dashboard
-3. Docker: `docker run -p 3737:3737 -e POLYFARM_DASHBOARD_TOKEN=secret polyfarm dashboard` → remote access with auth
+2. Deploy, verify sweep logs show merge/redeem activity every 10 min
+3. After 1 hour: check portfolio — no accumulated stale positions
 
 ---
 

@@ -139,6 +139,28 @@ function freshPayload(db: PolyfarmDb): string {
     });
   }
 
+  // Stale positions: inventory not in current active markets
+  const stalePositions = inventory
+    .filter((inv) => !quotedConditionIds.has(inv.condition_id) && inv.current_balance > 0)
+    .map((inv) => {
+      const market = allMarkets.find((m) => m.condition_id === inv.condition_id);
+      const mid = market?.midpoint ?? 0.5;
+      const value = inv.side === "YES" ? inv.current_balance * mid : inv.current_balance * (1 - mid);
+      // Suggest action based on pairing
+      const hasPair = inventory.some(
+        (other) => other.condition_id === inv.condition_id && other.side !== inv.side && other.current_balance > 0,
+      );
+      const suggestedAction = hasPair ? "merge" : "sell";
+      return {
+        conditionId: inv.condition_id,
+        question: market?.question ?? inv.condition_id.slice(0, 12) + "...",
+        side: inv.side,
+        balance: inv.current_balance,
+        estimatedValue: value,
+        suggestedAction,
+      };
+    });
+
   return JSON.stringify({
     session,
     liveOrders,
@@ -148,6 +170,7 @@ function freshPayload(db: PolyfarmDb): string {
     inventory,
     pnlSummary,
     rewardScores,
+    stalePositions,
   });
 }
 

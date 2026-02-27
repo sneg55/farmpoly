@@ -214,6 +214,20 @@ export function dashboardHtml(): string {
   </div>
 </div>
 
+<div class="section" id="stale-section" style="display:none">
+  <div class="section-title" style="color:var(--yellow)">Stale Positions <span class="badge" id="stale-count">0</span></div>
+  <div class="card" style="padding:0;overflow-x:auto">
+    <table>
+      <thead>
+        <tr><th>Market</th><th>Side</th><th>Balance</th><th>Est. Value</th><th>Action</th></tr>
+      </thead>
+      <tbody id="stale-body">
+        <tr><td colspan="5" class="empty">No stale positions</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <div class="section">
   <div class="section-title">Markets <span class="badge" id="mkt-count">0</span></div>
   <div class="filter-row">
@@ -417,6 +431,25 @@ async function refresh(){
           '<td>'+fmt(i.current_balance,1)+'</td>'+
           '<td class="'+statusColor+'">'+statusLabel+'</td>'+
           '</tr>'}).join('');
+    }
+
+    // Stale positions (not in active markets)
+    const stale=d.stalePositions||[];
+    const staleSec=document.getElementById('stale-section');
+    document.getElementById('stale-count').textContent=stale.length;
+    if(stale.length>0){
+      staleSec.style.display='';
+      document.getElementById('stale-body').innerHTML=stale.map(p=>{
+        const actionColor=p.suggestedAction==='merge'?'pnl-pos':'pnl-zero';
+        return '<tr>'+
+          '<td>'+esc(truncQ(p.question))+'</td>'+
+          '<td class="side-'+(p.side==='YES'?'buy':'sell')+'">'+esc(p.side)+'</td>'+
+          '<td>'+fmt(p.balance,1)+'</td>'+
+          '<td>$'+fmt(p.estimatedValue)+'</td>'+
+          '<td class="'+actionColor+'">'+esc(p.suggestedAction)+'</td>'+
+          '</tr>'}).join('');
+    } else {
+      staleSec.style.display='none';
     }
 
     // Markets — update data, re-render if count changed or first load

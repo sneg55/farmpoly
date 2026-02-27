@@ -19,10 +19,12 @@ import { SafetyMonitor } from "../../safety/monitor.js";
 import { detectTrend, type TrendDirection } from "../../intelligence/trend.js";
 import { FillDetector, type FillEvent } from "../../hedge/detector.js";
 import { executeHedge } from "../../hedge/executor.js";
-import { getTokenBalances } from "../../positions/fetcher.js";
+import { getTokenBalances, discoverHeldTokens } from "../../positions/fetcher.js";
 import { mergePositions } from "../../hedge/merger.js";
+import { autoRedeemResolved } from "../../positions/auto-redeemer.js";
 import { checkApproval } from "../../auth/approval.js";
 import { ethers } from "ethers";
+import { Side, OrderType } from "@polymarket/clob-client";
 import type { ClobClient } from "@polymarket/clob-client";
 
 export const runCommand = new Command("run")
@@ -393,16 +395,16 @@ export const runCommand = new Command("run")
           return;
         }
 
-        // Merge inventory from old markets before redeploying
-        if (sessionId !== null && mintEnabled) {
-          console.log("  Merging inventory from old markets...");
+        // Session-agnostic sweep before redeploying
+        if (mintEnabled) {
+          console.log("  Running inventory sweep before rebalance...");
           try {
-            const recovered = await mergeInventory(sessionId);
+            const recovered = await performInventorySweep();
             if (recovered > 0) {
-              console.log(chalk.green(`  Recovered $${recovered.toFixed(2)} USDC from inventory`));
+              console.log(chalk.green(`  Recovered $${recovered.toFixed(2)} USDC from sweep`));
             }
           } catch (err) {
-            console.log(chalk.yellow(`  Inventory merge error: ${(err as Error).message?.slice(0, 80)}`));
+            console.log(chalk.yellow(`  Sweep error: ${(err as Error).message?.slice(0, 80)}`));
           }
         }
 
@@ -652,6 +654,16 @@ export const runCommand = new Command("run")
               pnlColor(`P&L: ${result.pnlCents >= 0 ? "+" : ""}${result.pnlCents.toFixed(1)}c`) +
               (result.mergeTxHash ? chalk.dim(` [tx: ${result.mergeTxHash.slice(0, 10)}...]`) : ""),
             );
+
+            // Track NO-token timeout (16.5):
+            // ASK fill with no merge = holding NO tokens → start timeout
+            if (fill.side === "SELL" && result.mergeAmount === 0) {
+              noTokenTimestamps.set(fill.conditionId, Date.now());
+            }
+            // BID fill that merged = NO tokens consumed → clear timeout
+            if (fill.side === "BUY" && result.mergeAmount > 0) {
+              noTokenTimestamps.delete(fill.conditionId);
+            }
           } else {
             console.log(chalk.red(`  Hedge ${result.status}: fill exposure remains`));
           }
@@ -799,77 +811,163 @@ export const runCommand = new Command("run")
       }
 
       // ───────────────────────────────────────────────────
-      // GRACEFUL SHUTDOWN
+      // NO-TOKEN TIMEOUT TRACKER (16.5)
       // ───────────────────────────────────────────────────
+      // Records when ASK fills leave NO tokens as "natural hedge".
+      // Inventory sweep sells these after 15 min if no BID fill merges them.
+      const noTokenTimestamps = new Map<string, number>(); // conditionId → timestamp
+      const NO_TOKEN_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+      // ───────────────────────────────────────────────────
+      // INVENTORY SWEEP (16.3 + 16.4 + 16.5 + 16.6)
+      // ───────────────────────────────────────────────────
+      const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+      let sweepInFlight = false;
+      let sweepInterval: NodeJS.Timeout | null = null;
+
       /**
-       * Merge remaining inventory tokens back into USDC.
-       * Returns amount of USDC recovered.
+       * Session-agnostic inventory sweep:
+       * 1. Discover ALL on-chain token balances (not just current session)
+       * 2. Merge paired YES+NO positions → USDC
+       * 3. Auto-redeem resolved markets → USDC
+       * 4. Sell stale NO tokens held >15 min after ASK fill
        */
-      async function mergeInventory(currentSessionId: number): Promise<number> {
-        const inventory = db.getSessionInventory(currentSessionId);
-        if (inventory.length === 0) return 0;
-
-        // Group inventory by condition_id
-        const byCondition = new Map<string, { yes?: typeof inventory[0]; no?: typeof inventory[0] }>();
-        for (const inv of inventory) {
-          const entry = byCondition.get(inv.condition_id) ?? {};
-          if (inv.side === "YES") entry.yes = inv;
-          else entry.no = inv;
-          byCondition.set(inv.condition_id, entry);
-        }
-
+      async function performInventorySweep(): Promise<number> {
+        console.log(chalk.dim("\n[Sweep] Starting inventory sweep..."));
         let totalRecovered = 0;
 
-        for (const [conditionId, { yes, no }] of byCondition) {
-          // We need both YES and NO tokens to merge
-          if (!yes && !no) continue;
+        // 1. Discover all on-chain token balances
+        const heldTokens = await discoverHeldTokens(auth.wallet, env);
+        if (heldTokens.length === 0) {
+          console.log(chalk.dim("[Sweep] No tokens held on-chain."));
+          return 0;
+        }
+        console.log(chalk.dim(`[Sweep] Found ${heldTokens.length} non-zero token balance(s).`));
 
-          // Check on-chain balances
-          const tokenIds: string[] = [];
-          if (yes) tokenIds.push(yes.token_id);
-          if (no) tokenIds.push(no.token_id);
+        // Build tokenId → balance map
+        const balanceMap = new Map<string, ethers.BigNumber>();
+        for (const t of heldTokens) {
+          balanceMap.set(t.tokenId, t.balance);
+        }
 
+        // 2. Merge paired YES+NO positions
+        const markets = db.getMarkets();
+        for (const m of markets) {
+          const balYes = balanceMap.get(m.token_id_yes) ?? ethers.BigNumber.from(0);
+          const balNo = balanceMap.get(m.token_id_no) ?? ethers.BigNumber.from(0);
+          if (balYes.isZero() || balNo.isZero()) continue;
+
+          const mergeAmount = balYes.lt(balNo) ? balYes : balNo;
           try {
-            const balances = await getTokenBalances(auth.wallet, env, tokenIds);
-            const balMap = new Map<string, ethers.BigNumber>();
-            for (const b of balances) {
-              balMap.set(b.tokenId, b.balance);
-            }
-
-            const balYes = yes ? (balMap.get(yes.token_id) ?? ethers.BigNumber.from(0)) : ethers.BigNumber.from(0);
-            const balNo = no ? (balMap.get(no.token_id) ?? ethers.BigNumber.from(0)) : ethers.BigNumber.from(0);
-
-            const mergeAmount = balYes.lt(balNo) ? balYes : balNo;
-            if (mergeAmount.isZero()) continue;
-
-            // Look up negRisk from markets table
-            const markets = db.getMarkets();
-            const market = markets.find(m => m.condition_id === conditionId);
-            const negRisk = market ? market.neg_risk === 1 : false;
-
-            const txHash = await mergePositions(auth.wallet, env, conditionId, negRisk, mergeAmount);
+            const negRisk = m.neg_risk === 1;
+            const txHash = await mergePositions(auth.wallet, env, m.condition_id, negRisk, mergeAmount);
             const recoveredUsdc = Number(ethers.utils.formatUnits(mergeAmount, 6));
             totalRecovered += recoveredUsdc;
-
             console.log(chalk.green(
-              `  Merged ${recoveredUsdc.toFixed(2)} USDC from ${conditionId.slice(0, 12)}... [tx: ${txHash.slice(0, 10)}...]`,
+              `[Sweep] Merged $${recoveredUsdc.toFixed(2)} from ${m.question.slice(0, 40)}... [tx: ${txHash.slice(0, 10)}...]`,
             ));
-
-            // Update inventory balances
-            if (yes) db.updateInventoryBalance(yes.id, Math.max(0, Number(ethers.utils.formatUnits(balYes.sub(mergeAmount), 6))));
-            if (no) db.updateInventoryBalance(no.id, Math.max(0, Number(ethers.utils.formatUnits(balNo.sub(mergeAmount), 6))));
           } catch (err) {
-            console.log(chalk.yellow(`  Failed to merge inventory for ${conditionId.slice(0, 12)}...: ${(err as Error).message?.slice(0, 80)}`));
+            console.log(chalk.dim(`[Sweep] Merge failed for ${m.condition_id.slice(0, 12)}...: ${(err as Error).message?.slice(0, 100)}`));
           }
+        }
+
+        // 3. Auto-redeem resolved markets
+        try {
+          const redeemResult = await autoRedeemResolved(auth.wallet, env, heldTokens, markets);
+          for (const r of redeemResult.redeemed) {
+            totalRecovered += r.usdcRecovered;
+          }
+          if (redeemResult.redeemed.length > 0) {
+            console.log(chalk.green(`[Sweep] Redeemed ${redeemResult.redeemed.length} resolved market(s).`));
+          }
+        } catch (err) {
+          console.log(chalk.dim(`[Sweep] Auto-redeem error: ${(err as Error).message?.slice(0, 100)}`));
+        }
+
+        // 4. Sell stale NO tokens (held >15 min after ASK fill without BID merge)
+        const now = Date.now();
+        for (const [conditionId, timestamp] of noTokenTimestamps) {
+          if (now - timestamp < NO_TOKEN_TIMEOUT_MS) continue;
+
+          const market = markets.find(m => m.condition_id === conditionId);
+          if (!market) continue;
+
+          const noBalance = balanceMap.get(market.token_id_no);
+          if (!noBalance || noBalance.isZero()) {
+            noTokenTimestamps.delete(conditionId);
+            continue;
+          }
+
+          // Sell NO tokens via market order at complement price
+          const mid = market.midpoint ?? 0.5;
+          const noPrice = 1 - mid;
+          const tickDecimals = market.tick_size === "0.1" ? 1 : market.tick_size === "0.001" ? 3 : market.tick_size === "0.0001" ? 4 : 2;
+          // Price slightly below complement to ensure fill
+          const sellPrice = Math.floor((noPrice - 0.02) * Math.pow(10, tickDecimals)) / Math.pow(10, tickDecimals);
+          const sellSize = Math.floor(Number(ethers.utils.formatUnits(noBalance, 6)));
+
+          if (sellPrice <= 0.01 || sellSize <= 0) {
+            noTokenTimestamps.delete(conditionId);
+            continue;
+          }
+
+          try {
+            const order = await auth.clobClient.createOrder({
+              tokenID: market.token_id_no,
+              price: sellPrice,
+              size: sellSize,
+              side: Side.SELL,
+            }, {
+              tickSize: market.tick_size as "0.1" | "0.01" | "0.001" | "0.0001",
+              negRisk: market.neg_risk === 1,
+            });
+            const response = await auth.clobClient.postOrder(order, OrderType.FAK);
+            if (response && (response.orderID || response.id)) {
+              console.log(chalk.yellow(
+                `[Sweep] Sold stale NO: ${sellSize} @ ${sellPrice.toFixed(tickDecimals)} ` +
+                `for ${market.question.slice(0, 35)}... (held ${Math.round((now - timestamp) / 60000)}min)`,
+              ));
+            }
+            noTokenTimestamps.delete(conditionId);
+          } catch (err) {
+            console.log(chalk.dim(`[Sweep] Failed to sell NO for ${conditionId.slice(0, 12)}...: ${(err as Error).message?.slice(0, 100)}`));
+          }
+        }
+
+        if (totalRecovered > 0) {
+          console.log(chalk.green(`[Sweep] Total recovered: $${totalRecovered.toFixed(2)} USDC`));
+        } else {
+          console.log(chalk.dim("[Sweep] No positions to recover."));
         }
 
         return totalRecovered;
       }
 
+      // Start sweep interval
+      if (mintEnabled) {
+        console.log(chalk.dim(`Inventory sweep every ${INVENTORY_SWEEP_INTERVAL_MS / 60_000} minutes`));
+        sweepInterval = setInterval(async () => {
+          if (sweepInFlight) return;
+          sweepInFlight = true;
+          try {
+            await performInventorySweep();
+          } catch (err) {
+            console.log(chalk.dim(`[Sweep] Error: ${(err as Error).message?.slice(0, 100)}`));
+          } finally {
+            sweepInFlight = false;
+          }
+        }, INVENTORY_SWEEP_INTERVAL_MS);
+      }
+
+      // ───────────────────────────────────────────────────
+      // GRACEFUL SHUTDOWN (session-agnostic: 16.4)
+      // ───────────────────────────────────────────────────
+
       const shutdown = async (signal: string) => {
         console.log(chalk.bold(`\n${signal} received. Shutting down gracefully...`));
         clearInterval(heartbeatInterval);
         if (rebalanceInterval) clearInterval(rebalanceInterval);
+        if (sweepInterval) clearInterval(sweepInterval);
         fillDetector?.stop();
         monitor?.stop();
 
@@ -886,18 +984,16 @@ export const runCommand = new Command("run")
           console.error(chalk.red("Warning: Failed to cancel some orders"), err);
         }
 
-        // Merge remaining inventory tokens back into USDC
-        if (sessionId !== null && mintEnabled) {
-          console.log("Merging remaining inventory...");
+        // Session-agnostic merge: sweep ALL on-chain positions (not just current session)
+        if (mintEnabled) {
+          console.log("Running final inventory sweep (session-agnostic)...");
           try {
-            const recovered = await mergeInventory(sessionId);
+            const recovered = await performInventorySweep();
             if (recovered > 0) {
-              console.log(chalk.green(`Recovered $${recovered.toFixed(2)} USDC from inventory merge`));
-            } else {
-              console.log(chalk.dim("No inventory to merge."));
+              console.log(chalk.green(`Recovered $${recovered.toFixed(2)} USDC from final sweep`));
             }
           } catch (err) {
-            console.error(chalk.yellow(`Warning: inventory merge error: ${(err as Error).message}`));
+            console.error(chalk.yellow(`Warning: final sweep error: ${(err as Error).message}`));
           }
         }
 
