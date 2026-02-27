@@ -31,8 +31,24 @@ function getOrCreateMockFns(address: string): Record<string, ReturnType<typeof v
 vi.mock("ethers", () => {
   const MaxUint256 = { type: "BigNumber", hex: "0xff" };
 
+  function mockBN(n: number) {
+    return {
+      _value: n,
+      gt: (other: any) => n > (other?._value ?? 0),
+      mul: (m: number) => mockBN(n * m),
+      add: (other: any) => mockBN(n + (other?._value ?? 0)),
+      toString: () => String(n),
+    };
+  }
+
   class MockJsonRpcProvider {
     constructor() {}
+    async getFeeData() {
+      return {
+        maxPriorityFeePerGas: mockBN(35_000_000_000),
+        lastBaseFeePerGas: mockBN(30_000_000_000),
+      };
+    }
   }
 
   class MockContract {
@@ -55,6 +71,15 @@ vi.mock("ethers", () => {
       constants: { MaxUint256 },
       providers: {
         JsonRpcProvider: MockJsonRpcProvider,
+      },
+      utils: {
+        parseUnits: (value: string, _unit: number | string) => {
+          const num = parseFloat(value);
+          if (isNaN(num)) return mockBN(0);
+          if (_unit === "gwei") return mockBN(num * 1e9);
+          if (typeof _unit === "number") return mockBN(Math.round(num * Math.pow(10, _unit)));
+          return mockBN(num);
+        },
       },
     },
   };
