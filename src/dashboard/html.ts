@@ -482,7 +482,7 @@ export function dashboardHtml(): string {
 <script>
 function fmt(n,d=2){return n!=null?Number(n).toFixed(d):'--'}
 function fmtUsd(n){if(n==null)return'--';if(n>=1e6)return'$'+(n/1e6).toFixed(1)+'M';if(n>=1e3)return'$'+(n/1e3).toFixed(1)+'K';return'$'+n.toFixed(0)}
-function fmtCents(c){if(c==null)return'--';const d=c/100;return(d>=0?'+':'')+d.toFixed(2)}
+function fmtCents(c){if(c==null)return'--';const d=c/100;return(d>=0?'+$':'-$')+Math.abs(d).toFixed(2)}
 function fmtTime(ts){if(!ts)return'--';const d=new Date(ts*1000);return d.toLocaleTimeString()}
 function shortId(id){return id?id.slice(0,10)+'..':'--'}
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms)}
@@ -584,6 +584,13 @@ async function refresh(){
     rewardMap=new Map();
     for(const rs of scores)rewardMap.set(rs.conditionId,rs);
 
+    // Build condition_id → question lookup from all known markets
+    const mktMap=new Map();
+    const names=d.marketNames||{};
+    for(const cid of Object.keys(names))mktMap.set(cid,names[cid]);
+    // Fallback: also include active markets
+    for(const m of (d.markets||[]))if(!mktMap.has(m.condition_id))mktMap.set(m.condition_id,m.question);
+
     // Live orders
     const ob=document.getElementById('orders-body');
     const orders=d.liveOrders||[];
@@ -591,15 +598,18 @@ async function refresh(){
     if(orders.length===0){
       ob.innerHTML='<tr><td colspan="7" class="empty">No live orders</td></tr>';
     } else {
-      ob.innerHTML=orders.map(o=>'<tr>'+
+      ob.innerHTML=orders.map(o=>{
+        const q=mktMap.get(o.condition_id);
+        const mktLabel=q?esc(truncQ(q)):'<span class="mono">'+esc(shortId(o.condition_id))+'</span>';
+        return '<tr>'+
         '<td class="mono">'+esc(shortId(o.order_id))+'</td>'+
-        '<td class="mono">'+esc(shortId(o.condition_id))+'</td>'+
+        '<td style="max-width:220px">'+mktLabel+'</td>'+
         '<td class="side-'+(o.side==='BUY'?'buy':'sell')+'">'+esc(o.side)+'</td>'+
         '<td>'+fmt(o.price)+'</td>'+
         '<td>'+fmt(o.size,1)+'</td>'+
         '<td>'+esc(o.order_type)+'</td>'+
         '<td>'+fmtTime(o.placed_at)+'</td>'+
-        '</tr>').join('');
+        '</tr>'}).join('');
     }
 
     // Position exposure (inventory)
@@ -613,8 +623,10 @@ async function refresh(){
         const ratio=i.minted_amount>0?(i.current_balance/i.minted_amount):0;
         const statusLabel=ratio>0.9?'Full':ratio>0?'Partial':'Consumed';
         const statusColor=ratio>0.9?'pnl-pos':ratio>0?'pnl-zero':'pnl-neg';
+        const q=mktMap.get(i.condition_id);
+        const invLabel=q?esc(truncQ(q)):'<span class="mono">'+esc(shortId(i.condition_id))+'</span>';
         return '<tr>'+
-          '<td class="mono">'+esc(shortId(i.condition_id))+'</td>'+
+          '<td style="max-width:220px">'+invLabel+'</td>'+
           '<td class="side-'+(i.side==='NO'?'sell':'buy')+'">'+esc(i.side)+'</td>'+
           '<td>'+fmt(i.minted_amount,1)+'</td>'+
           '<td>'+fmt(i.current_balance,1)+'</td>'+

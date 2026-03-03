@@ -64,6 +64,9 @@ function freshPayload(db: PolyfarmDb): string {
   const allMarkets = db.getMarkets();
   const recentOrders = db.getRecentOrders(50);
 
+  // O(1) market lookup by condition_id
+  const marketById = new Map(allMarkets.map((m) => [m.condition_id, m]));
+
   // Only show markets we're actively quoting (have live orders)
   const quotedConditionIds = new Set(liveOrders.map((o) => o.condition_id));
   const markets = allMarkets.filter((m) => quotedConditionIds.has(m.condition_id));
@@ -78,7 +81,12 @@ function freshPayload(db: PolyfarmDb): string {
     totalHedged: 0,
     totalFailed: 0,
     inventoryCount: inventory.length,
-    inventoryUsdc: inventory.reduce((sum, inv) => sum + inv.current_balance, 0),
+    inventoryUsdc: inventory.reduce((sum, inv) => {
+      const market = marketById.get(inv.condition_id);
+      if (!market?.midpoint) return sum; // skip positions with unknown midpoint
+      const value = inv.side === "YES" ? inv.current_balance * market.midpoint : inv.current_balance * (1 - market.midpoint);
+      return sum + value;
+    }, 0),
   };
   for (const h of hedges) {
     if (h.status === "HEDGED") {
@@ -143,7 +151,7 @@ function freshPayload(db: PolyfarmDb): string {
   const stalePositions = inventory
     .filter((inv) => !quotedConditionIds.has(inv.condition_id) && inv.current_balance > 0)
     .map((inv) => {
-      const market = allMarkets.find((m) => m.condition_id === inv.condition_id);
+      const market = marketById.get(inv.condition_id);
       const mid = market?.midpoint ?? 0.5;
       const value = inv.side === "YES" ? inv.current_balance * mid : inv.current_balance * (1 - mid);
       // Suggest action based on pairing
@@ -161,6 +169,12 @@ function freshPayload(db: PolyfarmDb): string {
       };
     });
 
+  // Lightweight lookup for market questions (used by inventory/order labels)
+  const marketNames: Record<string, string> = {};
+  for (const m of allMarkets) {
+    marketNames[m.condition_id] = m.question;
+  }
+
   return JSON.stringify({
     session,
     liveOrders,
@@ -171,11 +185,14 @@ function freshPayload(db: PolyfarmDb): string {
     pnlSummary,
     rewardScores,
     stalePositions,
+    marketNames,
   });
 }
 
 export function createDashboardServer(opts: DashboardOptions): http.Server {
   const { db, onPanic, authToken } = opts;
+  const isRemote = opts.host === "0.0.0.0" || opts.host === "::";
+  const secureSuffix = isRemote ? "; Secure" : "";
   const html = dashboardHtml();
   const loginPage = loginHtml();
 
@@ -184,7 +201,7 @@ export function createDashboardServer(opts: DashboardOptions): http.Server {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+    "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; style-src-elem 'unsafe-inline' https://fonts.googleapis.com",
   };
 
   function setSecurityHeaders(res: http.ServerResponse): void {
@@ -243,7 +260,7 @@ export function createDashboardServer(opts: DashboardOptions): http.Server {
         if (!authToken || token === authToken) {
           res.writeHead(200, {
             "Content-Type": "application/json",
-            "Set-Cookie": `polyfarm_token=${authToken}; HttpOnly; SameSite=Strict; Path=/`,
+            "Set-Cookie": `polyfarm_token=${authToken}; HttpOnly; SameSite=Strict; Path=/${secureSuffix}`,
           });
           res.end(JSON.stringify({ ok: true }));
         } else {
@@ -255,7 +272,7 @@ export function createDashboardServer(opts: DashboardOptions): http.Server {
       if (url.pathname === "/api/logout" && req.method === "POST") {
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Set-Cookie": "polyfarm_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+          "Set-Cookie": `polyfarm_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureSuffix}`,
         });
         res.end(JSON.stringify({ ok: true }));
         return;
